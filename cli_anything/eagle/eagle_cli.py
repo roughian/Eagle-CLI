@@ -12,6 +12,7 @@ import click
 from cli_anything.eagle import __version__
 from cli_anything.eagle.core.client import DEFAULT_BASE_URL, EagleApiError, EagleClient
 from cli_anything.eagle.core.state import SessionState
+from cli_anything.eagle.core.storage import delete_preset, get_preset, load_presets, set_preset
 from cli_anything.eagle.utils.folders import (
     FolderRecord,
     find_folder_by_path,
@@ -38,6 +39,23 @@ class AppContext:
 
 def pass_app(fn):
     return click.pass_obj(fn)
+
+
+def item_filter_options(fn):
+    options = [
+        click.option("--folder-path", "folder_paths", multiple=True, help="Exact folder path filter."),
+        click.option("--folder-name", "folder_names", multiple=True, help="Exact folder name filter."),
+        click.option("--folder", "folders", multiple=True, help="Repeatable folder ID filter."),
+        click.option("--tag", "tags", multiple=True, help="Repeatable tag filter."),
+        click.option("--ext", default=None),
+        click.option("--keyword", default=None),
+        click.option("--order-by", default=None, help="Examples: CREATEDATE, -FILESIZE, NAME, -RESOLUTION."),
+        click.option("--offset", type=int, default=0, show_default=True),
+        click.option("--limit", type=int, default=20, show_default=True),
+    ]
+    for option in options:
+        fn = option(fn)
+    return fn
 
 
 @click.group(invoke_without_command=True)
@@ -166,6 +184,98 @@ def library_icon(app: AppContext, library_path: str, download: Path | None) -> N
 
 
 @cli.group()
+def preset() -> None:
+    """Saved preset commands."""
+
+
+@preset.command("list")
+@pass_app
+def preset_list(app: AppContext) -> None:
+    data = load_presets()
+    rows = []
+    for name, preset_data in sorted(data.get("presets", {}).items()):
+        params = preset_data.get("params", {})
+        rows.append(
+            {
+                "name": name,
+                "kind": preset_data.get("kind", ""),
+                "keyword": params.get("keyword", ""),
+                "tags": params.get("tags", []),
+                "folders": params.get("folder_paths", []) or params.get("folder_names", []) or params.get("folders", []),
+            }
+        )
+    _emit_and_remember(app, "preset list", {"status": "success", "data": rows})
+
+
+@preset.command("show")
+@click.argument("name")
+@pass_app
+def preset_show(app: AppContext, name: str) -> None:
+    preset_data = get_preset(name)
+    if preset_data is None:
+        raise click.ClickException(f"Unknown preset: {name}")
+    _emit_and_remember(app, "preset show", {"status": "success", "data": {"name": name, **preset_data}})
+
+
+@preset.command("delete")
+@click.argument("name")
+@pass_app
+def preset_delete(app: AppContext, name: str) -> None:
+    if not delete_preset(name):
+        raise click.ClickException(f"Unknown preset: {name}")
+    _emit_and_remember(app, "preset delete", {"status": "success", "data": {"deleted": name}})
+
+
+@preset.command("save-item-list")
+@click.argument("name")
+@item_filter_options
+@pass_app
+def preset_save_item_list(
+    app: AppContext,
+    name: str,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    params = _item_filter_payload_from_args(
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    preset_data = {
+        "kind": "item-list",
+        "params": params,
+    }
+    set_preset(name, preset_data)
+    _emit_and_remember(app, "preset save-item-list", {"status": "success", "data": {"name": name, **preset_data}})
+
+
+@preset.command("run-item-list")
+@click.argument("name")
+@pass_app
+def preset_run_item_list(app: AppContext, name: str) -> None:
+    preset_data = get_preset(name)
+    if preset_data is None:
+        raise click.ClickException(f"Unknown preset: {name}")
+    if preset_data.get("kind") != "item-list":
+        raise click.ClickException(f"Preset '{name}' is not an item-list preset.")
+    params = _build_item_filters_from_preset(app, preset_data.get("params", {}))
+    _emit_and_remember(app, f"preset run-item-list {name}", app.client.item_list(**params))
+
+
+@cli.group()
 def folder() -> None:
     """Folder commands."""
 
@@ -252,6 +362,7 @@ def folder_create(
 @click.option("--parent-path", default=None, help="Exact parent folder path.")
 @click.option("--description", default=None, help="Leaf folder description to apply.")
 @click.option("--color", type=click.Choice(FOLDER_COLORS), default=None, help="Leaf folder color to apply.")
+@click.option("--save-plan", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write the generated operation plan to a JSON file.")
 @pass_app
 def folder_ensure(
     app: AppContext,
@@ -261,6 +372,7 @@ def folder_ensure(
     parent_path: str | None,
     description: str | None,
     color: str | None,
+    save_plan: Path | None,
 ) -> None:
     parent = _resolve_folder_selector(
         app,
@@ -277,6 +389,11 @@ def folder_ensure(
         description=description,
         color=color,
     )
+    if save_plan is not None:
+        _write_plan(
+            save_plan,
+            _plan_document("folder ensure", result["data"].get("operations", []), context={"folder_name": folder_name}),
+        )
     _emit_and_remember(app, "folder ensure", result)
 
 
@@ -287,6 +404,7 @@ def folder_ensure(
 @click.option("--parent-path", default=None, help="Exact parent folder path for the first segment.")
 @click.option("--description", default=None, help="Leaf folder description to apply.")
 @click.option("--color", type=click.Choice(FOLDER_COLORS), default=None, help="Leaf folder color to apply.")
+@click.option("--save-plan", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write the generated operation plan to a JSON file.")
 @pass_app
 def folder_ensure_path(
     app: AppContext,
@@ -296,6 +414,7 @@ def folder_ensure_path(
     parent_path: str | None,
     description: str | None,
     color: str | None,
+    save_plan: Path | None,
 ) -> None:
     parent = _resolve_folder_selector(
         app,
@@ -312,6 +431,11 @@ def folder_ensure_path(
         description=description,
         color=color,
     )
+    if save_plan is not None:
+        _write_plan(
+            save_plan,
+            _plan_document("folder ensure-path", result["data"].get("operations", []), context={"folder_path": folder_path}),
+        )
     _emit_and_remember(app, "folder ensure-path", result)
 
 
@@ -369,15 +493,7 @@ def item() -> None:
 
 
 @item.command("list")
-@click.option("--limit", type=int, default=20, show_default=True)
-@click.option("--offset", type=int, default=0, show_default=True)
-@click.option("--order-by", default=None, help="Examples: CREATEDATE, -FILESIZE, NAME, -RESOLUTION.")
-@click.option("--keyword", default=None)
-@click.option("--ext", default=None)
-@click.option("--tag", "tags", multiple=True, help="Repeatable tag filter.")
-@click.option("--folder", "folders", multiple=True, help="Repeatable folder ID filter.")
-@click.option("--folder-name", "folder_names", multiple=True, help="Exact folder name filter.")
-@click.option("--folder-path", "folder_paths", multiple=True, help="Exact folder path filter.")
+@item_filter_options
 @pass_app
 def item_list(
     app: AppContext,
@@ -475,6 +591,7 @@ def item_update(
 @click.option("--annotation", default=None, help="Set annotation on each matched item.")
 @click.option("--url", "source_url", default=None, help="Set source URL on each matched item.")
 @click.option("--star", type=click.IntRange(0, 5), default=None, help="Set star rating on each matched item.")
+@click.option("--save-plan", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write the generated operation plan to a JSON file.")
 @pass_app
 def item_bulk_update(
     app: AppContext,
@@ -493,6 +610,7 @@ def item_bulk_update(
     annotation: str | None,
     source_url: str | None,
     star: int | None,
+    save_plan: Path | None,
 ) -> None:
     if not any([set_tags, add_tags, annotation is not None, source_url is not None, star is not None]):
         raise click.ClickException("Provide at least one mutation field such as --set-tag, --add-tag, --annotation, --url, or --star.")
@@ -537,6 +655,7 @@ def item_bulk_update(
             payload["star"] = star
         operations.append(
             {
+                "method": "POST",
                 "item": {
                     "id": item.get("id"),
                     "name": item.get("name"),
@@ -544,7 +663,31 @@ def item_bulk_update(
                 },
                 "endpoint": "/api/item/update",
                 "payload": payload,
+                "description": f"Update item {item.get('id')} ({item.get('name')})",
             }
+        )
+
+    if save_plan is not None:
+        _write_plan(
+            save_plan,
+            _plan_document(
+                "item bulk-update",
+                operations,
+                context={
+                    "matched_count": len(operations),
+                    "filters": _item_filter_payload_from_args(
+                        limit=limit,
+                        offset=offset,
+                        order_by=order_by,
+                        keyword=keyword,
+                        ext=ext,
+                        tags=tags,
+                        folders=folders,
+                        folder_names=folder_names,
+                        folder_paths=folder_paths,
+                    ),
+                },
+            ),
         )
 
     if app.dry_run:
@@ -556,6 +699,7 @@ def item_bulk_update(
                 "data": {
                     "matched_count": len(operations),
                     "operations": operations,
+                    "saved_plan": str(save_plan) if save_plan is not None else None,
                 },
             },
         )
@@ -589,6 +733,8 @@ def item_bulk_update(
                 "matched_count": len(operations),
                 "updated_count": len(results),
                 "items": results,
+                "operations": operations,
+                "saved_plan": str(save_plan) if save_plan is not None else None,
             },
         },
     )
@@ -905,6 +1051,83 @@ def item_refresh_thumbnail(app: AppContext, item_id: str) -> None:
 
 
 @cli.group()
+def plan() -> None:
+    """Operation plan commands."""
+
+
+@plan.command("show")
+@click.argument("plan_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@pass_app
+def plan_show(app: AppContext, plan_file: Path) -> None:
+    data = json.loads(plan_file.read_text(encoding="utf-8"))
+    _emit_and_remember(app, "plan show", {"status": "success", "data": data})
+
+
+@plan.command("save-last")
+@click.argument("plan_file", type=click.Path(dir_okay=False, path_type=Path))
+@pass_app
+def plan_save_last(app: AppContext, plan_file: Path) -> None:
+    operations = _extract_operations_from_document(app.state.last_response)
+    if not operations:
+        raise click.ClickException("The last command did not produce any reusable operations.")
+    document = _plan_document(app.state.last_command or "last-command", operations, context={"source": "session"})
+    _write_plan(plan_file, document)
+    _emit_and_remember(app, "plan save-last", {"status": "success", "data": {"saved_to": str(plan_file), "operations": len(operations)}})
+
+
+@plan.command("apply")
+@click.argument("plan_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@pass_app
+def plan_apply(app: AppContext, plan_file: Path) -> None:
+    data = json.loads(plan_file.read_text(encoding="utf-8"))
+    operations = _extract_operations_from_document(data)
+    if not operations:
+        raise click.ClickException("No operations found in the plan file.")
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "plan apply",
+            {
+                "status": "dry-run",
+                "data": {
+                    "plan_file": str(plan_file),
+                    "operations": operations,
+                },
+            },
+        )
+        return
+
+    results = []
+    for operation in operations:
+        response = app.client.raw_request(
+            operation.get("method", "POST"),
+            operation["endpoint"],
+            payload=operation.get("payload"),
+        )
+        results.append(
+            {
+                "endpoint": operation["endpoint"],
+                "method": operation.get("method", "POST"),
+                "status": response.get("status", "success"),
+                "description": operation.get("description"),
+            }
+        )
+
+    _emit_and_remember(
+        app,
+        "plan apply",
+        {
+            "status": "success",
+            "data": {
+                "plan_file": str(plan_file),
+                "applied_count": len(results),
+                "results": results,
+            },
+        },
+    )
+
+
+@cli.group()
 def raw() -> None:
     """Low-level raw API commands."""
 
@@ -992,19 +1215,59 @@ def _build_item_filters(
     folder_names: tuple[str, ...],
     folder_paths: tuple[str, ...],
 ) -> dict[str, Any]:
-    resolved_folder_ids = _resolve_folder_filters(
-        app,
-        folder_ids=list(folders),
-        folder_names=list(folder_names),
-        folder_paths=list(folder_paths),
+    raw_params = _item_filter_payload_from_args(
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
     )
+    return _build_item_filters_from_preset(app, raw_params)
+
+
+def _item_filter_payload_from_args(
+    *,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...] | list[str],
+    folders: tuple[str, ...] | list[str],
+    folder_names: tuple[str, ...] | list[str],
+    folder_paths: tuple[str, ...] | list[str],
+) -> dict[str, Any]:
     return {
         "limit": limit,
         "offset": offset,
-        "orderBy": order_by,
+        "order_by": order_by,
         "keyword": keyword,
         "ext": ext,
-        "tags": ",".join(tags) if tags else None,
+        "tags": list(tags),
+        "folders": list(folders),
+        "folder_names": list(folder_names),
+        "folder_paths": list(folder_paths),
+    }
+
+
+def _build_item_filters_from_preset(app: AppContext, raw_params: dict[str, Any]) -> dict[str, Any]:
+    resolved_folder_ids = _resolve_folder_filters(
+        app,
+        folder_ids=list(raw_params.get("folders") or []),
+        folder_names=list(raw_params.get("folder_names") or []),
+        folder_paths=list(raw_params.get("folder_paths") or []),
+    )
+    return {
+        "limit": raw_params.get("limit", 20),
+        "offset": raw_params.get("offset", 0),
+        "orderBy": raw_params.get("order_by"),
+        "keyword": raw_params.get("keyword"),
+        "ext": raw_params.get("ext"),
+        "tags": ",".join(raw_params.get("tags") or []) if raw_params.get("tags") else None,
         "folders": ",".join(resolved_folder_ids) if resolved_folder_ids else None,
     }
 
@@ -1148,6 +1411,7 @@ def _ensure_folder_path(
     created: list[dict[str, Any]] = []
     reused: list[dict[str, Any]] = []
     planned: list[dict[str, Any]] = []
+    operations: list[dict[str, Any]] = []
     previous_parent_id = parent_id
     previous_parent_path = parent_path
     leaf_id: str | None = None
@@ -1172,6 +1436,14 @@ def _ensure_folder_path(
         payload = {"folderName": segment}
         if previous_parent_id:
             payload["parent"] = previous_parent_id
+        operations.append(
+            _make_operation(
+                "POST",
+                "/api/folder/create",
+                payload,
+                description=f"Create folder segment '{segment}' under '{previous_parent_path or '<root>'}'",
+            )
+        )
 
         if app.dry_run:
             planned_folder = {
@@ -1213,6 +1485,14 @@ def _ensure_folder_path(
             update_payload["newDescription"] = description
         if color is not None:
             update_payload["newColor"] = color
+        operations.append(
+            _make_operation(
+                "POST",
+                "/api/folder/update",
+                update_payload,
+                description=f"Update ensured folder '{leaf_path}'",
+            )
+        )
         if app.dry_run:
             planned.append({"endpoint": "/api/folder/update", "payload": update_payload, "folder_id": leaf_id})
             leaf_update = {"planned": True, "payload": update_payload}
@@ -1229,6 +1509,7 @@ def _ensure_folder_path(
             "reused": reused,
             "created": created,
             "planned": planned,
+            "operations": operations,
             "leaf_update": leaf_update,
         },
     }
@@ -1366,6 +1647,44 @@ def _unique_preserve_order(items: list[str]) -> list[str]:
         if item not in seen:
             seen.append(item)
     return seen
+
+
+def _make_operation(method: str, endpoint: str, payload: dict[str, Any] | None, *, description: str | None = None) -> dict[str, Any]:
+    operation: dict[str, Any] = {"method": method.upper(), "endpoint": endpoint}
+    if payload is not None:
+        operation["payload"] = payload
+    if description:
+        operation["description"] = description
+    return operation
+
+
+def _plan_document(command_name: str, operations: list[dict[str, Any]], *, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "kind": "eagle-cli-plan",
+        "version": 1,
+        "command": command_name,
+        "context": context or {},
+        "operations": operations,
+    }
+
+
+def _write_plan(path: Path, document: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _extract_operations_from_document(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        return []
+    operations = data.get("operations")
+    if isinstance(operations, list):
+        return operations
+    nested = data.get("data")
+    if isinstance(nested, dict):
+        nested_operations = nested.get("operations")
+        if isinstance(nested_operations, list):
+            return nested_operations
+    return []
 
 
 @cli.result_callback()

@@ -2,8 +2,8 @@
 
 `cli-anything-eagle` is a broad command-line interface for the Eagle desktop app.
 It targets Eagle's local HTTP API and exposes practical commands for app info,
-library management, folder workflows, item ingestion, bulk edits, and low-level
-escape hatches.
+library management, folder workflows, item ingestion, bulk edits, reusable
+presets, operation plans, and low-level escape hatches.
 
 ## Requirements
 
@@ -88,6 +88,30 @@ cli-anything-eagle item bulk-update \
   --add-tag reviewed
 ```
 
+Save and reuse frequent searches:
+
+```bash
+cli-anything-eagle preset save-item-list ui-ref \
+  --keyword ui \
+  --tag reference \
+  --folder-path "Design/UI/References"
+
+cli-anything-eagle preset list
+cli-anything-eagle preset run-item-list ui-ref
+```
+
+Export mutation plans and apply them later:
+
+```bash
+cli-anything-eagle --dry-run item bulk-update \
+  --folder-path "Design/UI/References" \
+  --add-tag reviewed \
+  --save-plan ./plans/reviewed.json
+
+cli-anything-eagle plan show ./plans/reviewed.json
+cli-anything-eagle plan apply ./plans/reviewed.json
+```
+
 ## Covered Commands
 
 - `doctor`
@@ -97,6 +121,8 @@ cli-anything-eagle item bulk-update \
 - `item list`, `info`, `thumbnail`, `update`, `bulk-update`
 - `item add-path`, `add-paths`, `add-url`, `add-urls`, `add-bookmark`
 - `item trash`, `refresh-palette`, `refresh-thumbnail`
+- `preset list`, `show`, `delete`, `save-item-list`, `run-item-list`
+- `plan show`, `save-last`, `apply`
 - `raw request`
 
 ## Notes

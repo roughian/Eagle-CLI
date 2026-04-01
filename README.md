@@ -7,7 +7,7 @@ library management, folders, items, and raw requests for unsupported endpoints.
 ## Install
 
 ```bash
-cd /Users/kim-wonseok/eagle-agent-harness
+cd /path/to/Eagle-CLI
 pip install -e .
 ```
 

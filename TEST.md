@@ -10,7 +10,7 @@
 ## Commands
 
 ```bash
-cd /Users/kim-wonseok/eagle-agent-harness
+cd /path/to/Eagle-CLI
 python3 -m unittest discover -s tests -v
 python3 -m cli_anything.eagle.eagle_cli --json doctor
 python3 -m cli_anything.eagle.eagle_cli --json app info

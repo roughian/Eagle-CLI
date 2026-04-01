@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cli-anything-eagle"
+version = "0.2.0"
+description = "CLI-Anything style harness for controlling Eagle through its local API."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "roughian", email = "kimws951027@gmail.com" }
+]
+dependencies = [
+  "click>=8.1.0",
+  "requests>=2.31.0",
+]
+keywords = ["eagle", "cli", "automation", "asset-management"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/roughian/Eagle-CLI"
+Repository = "https://github.com/roughian/Eagle-CLI"
+Issues = "https://github.com/roughian/Eagle-CLI/issues"
+
+[project.scripts]
+cli-anything-eagle = "cli_anything.eagle.eagle_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cli_anything*"]
+namespaces = true

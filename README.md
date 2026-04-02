@@ -5,7 +5,10 @@ app. It targets Eagle's local HTTP API and exposes practical commands for app
 info, library management, folder workflows, smart-folder rule inspection, item
 ingestion, bulk edits, reusable presets, preset bundles, item export,
 operation plans, query stats, rollback snapshots, snapshot diffs, duplicate and
-cleanup audits, duplicate cleanup plan generation, high-level organize flows,
+cleanup audits, duplicate cleanup plan generation, tag audits and normalization,
+saved selection sets, reusable reports, declarative workflows, manifest-driven
+ingestion, incremental import watching, plan merge/filter/split/validate
+tooling, shell-completion helpers, document schemas, high-level organize flows,
 and a companion bridge plugin for name and folder operations that are not
 available through the local HTTP API alone.
 
@@ -58,6 +61,9 @@ cli-anything-eagle --json item list --limit 10 --tag reference
 cli-anything-eagle --json audit duplicates --all --top 5
 cli-anything-eagle --json audit dedupe-plan ./plans/duplicates.json --keyword logo
 cli-anything-eagle --json plan stats ./plans/duplicates.json
+cli-anything-eagle --json tag stats --all --top 10
+cli-anything-eagle --json select list
+cli-anything-eagle --json workflow validate ./workflow.yml
 cli-anything-eagle --json bridge status
 ```
 
@@ -263,23 +269,79 @@ cli-anything-eagle plan stats ./plans/rename.json
 cli-anything-eagle plan apply ./plans/rename.json
 ```
 
+Audit and normalize tags before large cleanup passes:
+
+```bash
+cli-anything-eagle --json tag stats --all --top 25
+cli-anything-eagle --json tag audit --all --top 25
+cli-anything-eagle --dry-run tag normalize \
+  --all \
+  --trim \
+  --collapse-spaces \
+  --save-plan ./plans/normalize-tags.json
+
+cli-anything-eagle --dry-run tag alias-map-apply ./tag-aliases.yaml \
+  --all \
+  --save-plan ./plans/tag-aliases.json
+```
+
+Save and compare reusable item selections:
+
+```bash
+cli-anything-eagle select save review-set --keyword review --all
+cli-anything-eagle select sample review-set --count 10 --resolve
+cli-anything-eagle select diff review-set archived-set
+```
+
+Generate reusable reports and workflow plans:
+
+```bash
+cli-anything-eagle report library ./reports/library.md --format md
+cli-anything-eagle report tags ./reports/tags.csv --all --top 100 --format csv
+cli-anything-eagle report folders ./reports/folders.md --all --format md
+cli-anything-eagle report trend ./reports/trend.json --all --bucket month --field modification
+
+cli-anything-eagle workflow validate ./workflow.yml
+cli-anything-eagle --dry-run workflow run ./workflow.yml --save-plan ./plans/workflow.json
+cli-anything-eagle plan validate ./plans/workflow.json
+cli-anything-eagle plan split ./plans/workflow.json ./plans/chunks --max-operations 25
+cli-anything-eagle plan merge ./plans/all.json ./plans/chunks/*.json
+```
+
+Use manifests, incremental watching, shell completion, and built-in schemas:
+
+```bash
+cli-anything-eagle ingest manifest ./manifests/assets.json --folder-path "Design/UI/References"
+cli-anything-eagle --dry-run watch import-dir ./incoming --recursive --ext png --tag-from-name
+cli-anything-eagle completion script --shell zsh --output ./completions/cli-anything-eagle.zsh
+cli-anything-eagle schema show workflow --output ./schemas/workflow.json
+```
+
 ## Covered Commands
 
 - `doctor`
 - `app info`
 - `library info`, `history`, `switch`, `icon`, `summary`, `quick-access`
 - `smart-folder list`, `tree`, `show`, `rules`, `audit`, `run`
+- `tag stats`, `audit`, `rename`, `normalize`, `alias-map-apply`
 - `tag-group list`, `show`
 - `folder list`, `tree`, `find`, `recent`, `create`, `ensure`, `ensure-path`, `rename`, `update`
 - `item list`, `export`, `stats`, `info`, `thumbnail`, `update`, `bulk-update`, `rename-bulk`, `move-bulk`
 - `item add-path`, `add-paths`, `add-dir`, `add-url`, `add-urls`, `add-bookmark`
 - `item trash`, `refresh-palette`, `refresh-thumbnail`
+- `select list`, `save`, `show`, `delete`, `sample`, `diff`
+- `report library`, `tags`, `folders`, `trend`
 - `preset list`, `show`, `delete`, `export`, `import`, `save-item-list`, `run-item-list`, `save-bulk-update`, `run-bulk-update`
 - `snapshot create`, `show`, `diff`, `restore`
-- `audit duplicates`, `cleanup`, `dedupe-plan`
+- `audit duplicates`, `cleanup`, `cleanup-plan`, `dedupe-plan`
 - `organize apply`
 - `bridge status`, `export-plugin`, `install-plugin`, `ping`
-- `plan show`, `stats`, `save-last`, `apply`
+- `workflow validate`, `run`
+- `ingest manifest`
+- `watch import-dir`
+- `completion script`
+- `schema show`
+- `plan show`, `stats`, `save-last`, `apply`, `merge`, `split`, `filter`, `explain`, `validate`, `rollback-from-results`
 - `raw request`
 
 ## Notes
@@ -291,6 +353,9 @@ cli-anything-eagle plan apply ./plans/rename.json
   API that actually responded on the tested Eagle build.
 - The CLI stores session state and presets in `~/.config/cli-anything-eagle`.
   Existing `~/.config/eagle-agent-harness` state is read as a legacy fallback.
+- Session-state writes are now atomic, and a corrupted session file is moved
+  aside as `session.corrupt-<timestamp>.json` on the next load instead of
+  crashing the CLI.
 - `--last` reuses item IDs from the immediately previous item-producing command
   recorded in session state. It is best used in sequential workflows rather
   than parallel command runs.

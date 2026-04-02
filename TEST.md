@@ -15,6 +15,9 @@
   higher-level organize planning.
 - Validate sequential `--last` reuse, `--item-file` selectors, snapshot diffs,
   bridge-aware plan replay, and duplicate trash plan generation.
+- Validate selection-set persistence, report writers, tag normalization, and
+  declarative workflow dry runs.
+- Validate incremental watch planning plus shell-completion and schema helpers.
 - Run a small live smoke check separately against read-only endpoints only.
 
 ## Commands
@@ -41,8 +44,28 @@ python3 -m cli_anything.eagle.eagle_cli --json snapshot diff ./snapshot.json --i
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run snapshot restore ./snapshot.json
 python3 -m cli_anything.eagle.eagle_cli --json audit duplicates --all --top 5
 python3 -m cli_anything.eagle.eagle_cli --json audit cleanup --all --sample-limit 5
+python3 -m cli_anything.eagle.eagle_cli --json audit cleanup-plan ./cleanup.json --all --action add-tag
 python3 -m cli_anything.eagle.eagle_cli --json audit dedupe-plan ./dedupe.json --keyword ui --mode name-size --keep largest
 python3 -m cli_anything.eagle.eagle_cli --json plan stats ./dedupe.json
+python3 -m cli_anything.eagle.eagle_cli --json tag stats --all --top 10
+python3 -m cli_anything.eagle.eagle_cli --json tag audit --all --top 10
+python3 -m cli_anything.eagle.eagle_cli --json --dry-run tag normalize --item-id EXAMPLE --trim --collapse-spaces
+python3 -m cli_anything.eagle.eagle_cli --json select save review-set --item-id EXAMPLE
+python3 -m cli_anything.eagle.eagle_cli --json select sample review-set --count 1 --resolve
+python3 -m cli_anything.eagle.eagle_cli --json select diff review-set archived-set
+python3 -m cli_anything.eagle.eagle_cli --json report tags ./report-tags.json --all --top 10
+python3 -m cli_anything.eagle.eagle_cli --json report folders ./report-folders.json --all --top 10
+python3 -m cli_anything.eagle.eagle_cli --json report trend ./report-trend.json --all --bucket month
+python3 -m cli_anything.eagle.eagle_cli --json workflow validate ./workflow.yml
+python3 -m cli_anything.eagle.eagle_cli --json --dry-run workflow run ./workflow.yml --save-plan ./workflow-plan.json
+python3 -m cli_anything.eagle.eagle_cli --json plan validate ./workflow-plan.json
+python3 -m cli_anything.eagle.eagle_cli --json plan filter ./workflow-plan.json ./workflow-http.json --kind http
+python3 -m cli_anything.eagle.eagle_cli --json plan split ./workflow-plan.json ./plan-chunks --max-operations 10
+python3 -m cli_anything.eagle.eagle_cli --json plan merge ./workflow-merged.json ./plan-chunks/*.json
+python3 -m cli_anything.eagle.eagle_cli --json ingest manifest ./manifest.json
+python3 -m cli_anything.eagle.eagle_cli --json --dry-run watch import-dir ./incoming --recursive --ext png --tag-from-name
+python3 -m cli_anything.eagle.eagle_cli --json completion script --shell zsh --output ./completions/cli-anything-eagle.zsh
+python3 -m cli_anything.eagle.eagle_cli --json schema show workflow --output ./schemas/workflow.json
 python3 -m cli_anything.eagle.eagle_cli --json bridge export-plugin ./bridge-plugin
 python3 -m cli_anything.eagle.eagle_cli --json item list --limit 2 --keyword CleanShot
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run item bulk-update --last --add-tag reviewed
@@ -54,11 +77,15 @@ python3 -m cli_anything.eagle.eagle_cli organize apply --help
 python3 -m cli_anything.eagle.eagle_cli preset --help
 python3 -m cli_anything.eagle.eagle_cli smart-folder --help
 python3 -m cli_anything.eagle.eagle_cli plan --help
+python3 -m cli_anything.eagle.eagle_cli workflow --help
+python3 -m cli_anything.eagle.eagle_cli watch --help
+python3 -m cli_anything.eagle.eagle_cli select --help
+python3 -m cli_anything.eagle.eagle_cli tag --help
 ```
 
 ## Result
 
-- `python3 -m unittest discover -s tests -v` passed with 46 tests.
+- `python3 -m unittest discover -s tests -v` passed with 62 tests.
 - Live smoke checks passed for:
   - `cli-anything-eagle --json doctor`
   - `cli-anything-eagle --json app info`
@@ -83,8 +110,17 @@ python3 -m cli_anything.eagle.eagle_cli plan --help
   - `cli-anything-eagle --json item stats --all --limit 2 --keyword ui`
   - `cli-anything-eagle --json audit duplicates --all --top 5`
   - `cli-anything-eagle --json audit cleanup --all --sample-limit 5`
+  - `cli-anything-eagle --json audit cleanup-plan <tmp>/cleanup.json --all --action add-tag`
   - `cli-anything-eagle --json audit dedupe-plan <tmp>/dedupe.json --keyword CleanShot --mode name --keep largest`
   - `cli-anything-eagle --json plan stats <tmp>/dedupe.json`
+  - `cli-anything-eagle --json tag stats --all --top 10`
+  - `cli-anything-eagle --json select save smoke-selection --item-id <id>`
+  - `cli-anything-eagle --json select sample smoke-selection --count 1 --resolve`
+  - `cli-anything-eagle --json --dry-run workflow run <tmp>/workflow.yml --save-plan <tmp>/workflow-plan.json`
+  - `cli-anything-eagle --json plan validate <tmp>/workflow-plan.json`
+  - `cli-anything-eagle --json --dry-run watch import-dir <tmp> --ext png --tag review --tag-from-name`
+  - `cli-anything-eagle --json completion script --shell zsh --output <tmp>/cli-anything-eagle.zsh`
+  - `cli-anything-eagle --json schema show workflow --output <tmp>/workflow-schema.json`
   - `cli-anything-eagle --json preset export <tmp>/presets.json`
   - `cli-anything-eagle --json preset import <tmp>/presets.json --prefix imported-`
   - `cli-anything-eagle --json --dry-run item bulk-update --keyword ui --add-tag reviewed --max-items 10 --save-matches <tmp>/matches.json`
@@ -98,6 +134,10 @@ python3 -m cli_anything.eagle.eagle_cli plan --help
   - `cli-anything-eagle preset --help`
   - `cli-anything-eagle smart-folder --help`
   - `cli-anything-eagle plan --help`
+  - `cli-anything-eagle workflow --help`
+  - `cli-anything-eagle watch --help`
+  - `cli-anything-eagle select --help`
+  - `cli-anything-eagle tag --help`
 - Verified local Eagle API shape:
   - V1 endpoints responded successfully.
   - V2 endpoints were not available on the installed build.

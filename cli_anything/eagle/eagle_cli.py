@@ -4,12 +4,14 @@ import csv
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import click
+import yaml
 
 from cli_anything.eagle import __version__
 from cli_anything.eagle.core.bridge import (
@@ -28,7 +30,7 @@ from cli_anything.eagle.core.bridge import (
     wait_for_bridge_response,
 )
 from cli_anything.eagle.core.client import DEFAULT_BASE_URL, EagleApiError, EagleClient
-from cli_anything.eagle.core.state import SessionState
+from cli_anything.eagle.core.state import DEFAULT_STATE_DIR, SessionState
 from cli_anything.eagle.core.storage import delete_preset, get_preset, load_presets, save_presets, set_preset
 from cli_anything.eagle.utils.folders import (
     FolderRecord,
@@ -802,6 +804,161 @@ def preset_run_bulk_update(app: AppContext, name: str, save_plan: Path | None) -
         save_plan=save_plan,
     )
     _emit_and_remember(app, f"preset run-bulk-update {name}", result)
+
+
+@cli.group("select")
+def selection_group() -> None:
+    """Saved item selection commands."""
+
+
+@selection_group.command("list")
+@pass_app
+def selection_list(app: AppContext) -> None:
+    _emit_and_remember(app, "select list", {"status": "success", "data": _list_selections()})
+
+
+@selection_group.command("save")
+@click.argument("name")
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to save.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None)
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_filter_options
+@pass_app
+def selection_save(
+    app: AppContext,
+    name: str,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    query = _query_or_collect_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    selection_ids = [str(item.get("id")) for item in query["items"] if str(item.get("id"))]
+    saved_path = _save_selection(
+        name,
+        selection_ids,
+        context={
+            "query": query["query"],
+            "pages": query["pages"],
+            "source": "cli",
+        },
+    )
+    _emit_and_remember(
+        app,
+        "select save",
+        {
+            "status": "success",
+            "data": {
+                "name": name,
+                "saved_to": str(saved_path),
+                "item_count": len(selection_ids),
+                "sample_ids": selection_ids[:10],
+            },
+        },
+    )
+
+
+@selection_group.command("show")
+@click.argument("name")
+@pass_app
+def selection_show(app: AppContext, name: str) -> None:
+    payload = _load_selection(name)
+    _emit_and_remember(app, "select show", {"status": "success", "data": payload})
+
+
+@selection_group.command("sample")
+@click.argument("name")
+@click.option("--count", type=click.IntRange(1, None), default=10, show_default=True)
+@pass_app
+def selection_sample(app: AppContext, name: str, count: int) -> None:
+    payload = _load_selection(name)
+    item_ids = [str(item_id) for item_id in payload.get("item_ids") or [] if str(item_id)]
+    _emit_and_remember(
+        app,
+        "select sample",
+        {
+            "status": "success",
+            "data": {
+                "name": payload.get("name") or name,
+                "item_count": len(item_ids),
+                "sample_ids": item_ids[:count],
+            },
+        },
+    )
+
+
+@selection_group.command("diff")
+@click.argument("left_name")
+@click.argument("right_name")
+@pass_app
+def selection_diff(app: AppContext, left_name: str, right_name: str) -> None:
+    left = _load_selection(left_name)
+    right = _load_selection(right_name)
+    left_ids = [str(item_id) for item_id in left.get("item_ids") or [] if str(item_id)]
+    right_ids = [str(item_id) for item_id in right.get("item_ids") or [] if str(item_id)]
+    left_set = set(left_ids)
+    right_set = set(right_ids)
+    _emit_and_remember(
+        app,
+        "select diff",
+        {
+            "status": "success",
+            "data": {
+                "left": {"name": left.get("name") or left_name, "item_count": len(left_ids)},
+                "right": {"name": right.get("name") or right_name, "item_count": len(right_ids)},
+                "shared_count": len(left_set & right_set),
+                "left_only_count": len(left_set - right_set),
+                "right_only_count": len(right_set - left_set),
+                "left_only": sorted(left_set - right_set)[:50],
+                "right_only": sorted(right_set - left_set)[:50],
+            },
+        },
+    )
+
+
+@selection_group.command("delete")
+@click.argument("name")
+@pass_app
+def selection_delete(app: AppContext, name: str) -> None:
+    if not _delete_selection(name):
+        raise click.ClickException(f"Unknown selection: {name}")
+    _emit_and_remember(app, "select delete", {"status": "success", "data": {"deleted": name}})
 
 
 @cli.group()
@@ -1633,6 +1790,13 @@ def item_bulk_update(
 @click.option("--suffix", default="", help="Suffix to append to each name.")
 @click.option("--replace-from", default=None, help="Replace this exact substring before prefix/suffix are applied.")
 @click.option("--replace-to", default="", help="Replacement string for --replace-from.")
+@click.option("--regex-from", default=None, help="Apply a regular-expression replacement before prefix/suffix.")
+@click.option("--regex-to", default="", help="Replacement string for --regex-from.")
+@click.option(
+    "--name-template",
+    default=None,
+    help="Final rename template using {name}, {original}, {ext}, {id}, and {index}.",
+)
 @click.option("--strip", "strip_names", is_flag=True, help="Trim leading and trailing whitespace before applying prefix/suffix.")
 @click.option("--max-items", type=click.IntRange(1, None), default=None, help="Refuse to continue if more than this many items match.")
 @click.option("--require-match", type=click.IntRange(1, None), default=None, help="Require at least this many matched items.")
@@ -1662,6 +1826,9 @@ def item_rename_bulk(
     suffix: str,
     replace_from: str | None,
     replace_to: str,
+    regex_from: str | None,
+    regex_to: str,
+    name_template: str | None,
     strip_names: bool,
     max_items: int | None,
     require_match: int | None,
@@ -1713,6 +1880,9 @@ def item_rename_bulk(
         suffix=suffix,
         replace_from=replace_from,
         replace_to=replace_to,
+        regex_from=regex_from,
+        regex_to=regex_to,
+        name_template=name_template,
         strip_names=strip_names,
         skip_unchanged=skip_unchanged,
     )
@@ -2071,6 +2241,13 @@ def item_add_paths(
 @click.option("--folder-name", default=None, help="Exact target folder name.")
 @click.option("--folder-path", default=None, help="Exact target folder path.")
 @click.option("--save-manifest", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write the generated add-path manifest to a JSON file.")
+@click.option(
+    "--name-template",
+    default=None,
+    help="Name template using {name}, {stem}, {ext}, {parent}, {relative}, {relative_stem}, and {index}.",
+)
+@click.option("--tag-from-path", is_flag=True, help="Append directory names from the relative path as tags.")
+@click.option("--tag-from-name", is_flag=True, help="Append name-derived tokens as tags.")
 @pass_app
 def item_add_dir(
     app: AppContext,
@@ -2087,6 +2264,9 @@ def item_add_dir(
     folder_name: str | None,
     folder_path: str | None,
     save_manifest: Path | None,
+    name_template: str | None,
+    tag_from_path: bool,
+    tag_from_name: bool,
 ) -> None:
     target_folder = _resolve_folder_selector(
         app,
@@ -2104,16 +2284,16 @@ def item_add_dir(
         include_hidden=include_hidden,
         limit=limit,
     )
-    items = [
-        {
-            "path": str(path),
-            "name": path.stem,
-            **({"website": website} if website else {}),
-            **({"tags": list(tags)} if tags else {}),
-            **({"annotation": annotation} if annotation else {}),
-        }
-        for path in files
-    ]
+    items = _build_add_dir_items(
+        directory,
+        files,
+        website=website,
+        tags=tags,
+        annotation=annotation,
+        name_template=name_template,
+        tag_from_path=tag_from_path,
+        tag_from_name=tag_from_name,
+    )
     if save_manifest is not None:
         _write_manifest(
             save_manifest,
@@ -2124,6 +2304,9 @@ def item_add_dir(
                 "recursive": recursive,
                 "globs": list(globs),
                 "extensions": list(extensions),
+                "name_template": name_template,
+                "tag_from_path": tag_from_path,
+                "tag_from_name": tag_from_name,
                 "items": items,
             },
         )
@@ -2140,6 +2323,9 @@ def item_add_dir(
             "folder": _folder_row(target_folder) if target_folder else None,
             "directory": str(directory),
             "file_count": len(items),
+            "name_template": name_template,
+            "tag_from_path": tag_from_path,
+            "tag_from_name": tag_from_name,
             "saved_manifest": str(save_manifest) if save_manifest is not None else None,
         },
     )
@@ -2507,6 +2693,271 @@ def audit_cleanup(
     )
 
 
+@audit.command("cleanup-plan")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to audit.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option(
+    "--kind",
+    "kinds",
+    multiple=True,
+    type=click.Choice(["untagged", "unfiled", "missing-url", "missing-annotation", "deleted"]),
+    help="Repeatable cleanup strategy.",
+)
+@click.option("--action", type=click.Choice(["add-tag", "trash", "move-folder"]), default="add-tag", show_default=True)
+@click.option("--review-tag", default="needs-review", show_default=True, help="Tag added when --action=add-tag.")
+@click.option("--target-folder-id", default=None)
+@click.option("--target-folder-name", default=None)
+@click.option("--target-folder-path", default=None)
+@click.option("--ensure-target-path", default=None, help="Create the target folder path before planning cleanup moves.")
+@click.option("--batch-size", type=click.IntRange(1, None), default=100, show_default=True)
+@click.option("--save-report", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@item_filter_options
+@pass_app
+def audit_cleanup_plan(
+    app: AppContext,
+    output_file: Path,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    kinds: tuple[str, ...],
+    action: str,
+    review_tag: str,
+    target_folder_id: str | None,
+    target_folder_name: str | None,
+    target_folder_path: str | None,
+    ensure_target_path: str | None,
+    batch_size: int,
+    save_report: Path | None,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    query = _query_or_collect_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_kinds = kinds or ("untagged", "unfiled", "missing-url")
+    ensure_result = None
+    target_folder = None
+    if action == "move-folder":
+        ensure_result, target_folder = _resolve_move_target(
+            app,
+            target_folder_id=target_folder_id,
+            target_folder_name=target_folder_name,
+            target_folder_path=target_folder_path,
+            ensure_target_path=ensure_target_path,
+        )
+    operations, summary = _build_cleanup_plan_operations(
+        query["items"],
+        kinds=resolved_kinds,
+        action=action,
+        review_tag=review_tag,
+        target_folder_id=target_folder.id if target_folder is not None else None,
+        target_folder_path=target_folder.path if target_folder is not None else None,
+        batch_size=batch_size,
+    )
+    context = {
+        "query": query["query"],
+        "pages": query["pages"],
+        "kinds": list(resolved_kinds),
+        "action": action,
+        "review_tag": review_tag if action == "add-tag" else None,
+        "target_folder": _folder_row(target_folder),
+        "ensure_result": ensure_result,
+        **summary,
+    }
+    _write_plan(output_file, _plan_document("audit cleanup-plan", operations, context=context))
+    report = {
+        "title": "CLI-Anything Eagle Cleanup Plan",
+        **context,
+        "operations": operations,
+        "saved_plan": str(output_file),
+    }
+    if save_report is not None:
+        _write_manifest(save_report, report)
+    _emit_and_remember(
+        app,
+        "audit cleanup-plan",
+        {
+            "status": "success",
+            "data": {
+                **report,
+                "saved_report": str(save_report) if save_report is not None else None,
+            },
+        },
+    )
+
+
+@audit.command("cleanup-plan")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option(
+    "--kind",
+    "kinds",
+    multiple=True,
+    type=click.Choice(["untagged", "unfiled", "missing-url", "missing-annotation", "deleted"]),
+    help="Repeatable cleanup selector.",
+)
+@click.option("--action", type=click.Choice(["add-tag", "trash", "move-folder"]), default="add-tag", show_default=True)
+@click.option("--review-tag", default="needs-review", show_default=True)
+@click.option("--target-folder-id", default=None)
+@click.option("--target-folder-name", default=None)
+@click.option("--target-folder-path", default=None)
+@click.option("--ensure-target-path", default=None)
+@click.option("--batch-size", type=click.IntRange(1, None), default=100, show_default=True)
+@click.option("--save-report", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_filter_options
+@pass_app
+def audit_cleanup_plan(
+    app: AppContext,
+    output_file: Path,
+    kinds: tuple[str, ...],
+    action: str,
+    review_tag: str,
+    target_folder_id: str | None,
+    target_folder_name: str | None,
+    target_folder_path: str | None,
+    ensure_target_path: str | None,
+    batch_size: int,
+    save_report: Path | None,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    selected_kinds = kinds or ("untagged", "unfiled", "missing-url")
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    query = _query_or_collect_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    ensure_result = None
+    target_folder = None
+    if action == "move-folder":
+        ensure_result, target_folder = _resolve_move_target(
+            app,
+            target_folder_id=target_folder_id,
+            target_folder_name=target_folder_name,
+            target_folder_path=target_folder_path,
+            ensure_target_path=ensure_target_path,
+        )
+    operations, report = _build_cleanup_plan_operations(
+        query["items"],
+        kinds=selected_kinds,
+        action=action,
+        review_tag=review_tag,
+        target_folder_id=target_folder.id if target_folder is not None else None,
+        target_folder_path=target_folder.path if target_folder is not None else None,
+        batch_size=batch_size,
+    )
+    _write_plan(
+        output_file,
+        _plan_document(
+            "audit cleanup-plan",
+            operations,
+            context={
+                "kinds": list(selected_kinds),
+                "action": action,
+                "review_tag": review_tag,
+                "target_folder": _folder_row(target_folder),
+                "query": query["query"],
+                "pages": query["pages"],
+                "ensure_result": ensure_result,
+            },
+        ),
+    )
+    cleanup_report = {
+        "title": "CLI-Anything Eagle Cleanup Plan",
+        **report,
+        "kinds": list(selected_kinds),
+        "action": action,
+        "target_folder": _folder_row(target_folder),
+        "ensure_result": ensure_result,
+    }
+    if save_report is not None:
+        _write_report(save_report, cleanup_report, requested_format="auto")
+    _emit_and_remember(
+        app,
+        "audit cleanup-plan",
+        {
+            "status": "success",
+            "data": {
+                **cleanup_report,
+                "operation_count": len(operations),
+                "saved_plan": str(output_file),
+                "saved_report": str(save_report) if save_report is not None else None,
+            },
+        },
+    )
+
+
 @audit.command("dedupe-plan")
 @click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
 @click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect for duplicates.")
@@ -2619,6 +3070,9 @@ def organize() -> None:
 @click.option("--name-suffix", default="")
 @click.option("--replace-from", default=None)
 @click.option("--replace-to", default="")
+@click.option("--regex-from", default=None)
+@click.option("--regex-to", default="")
+@click.option("--name-template", default=None, help="Final rename template using {name}, {original}, {ext}, {id}, and {index}.")
 @click.option("--strip", "strip_names", is_flag=True)
 @click.option("--max-items", type=click.IntRange(1, None), default=None, help="Refuse to continue if more than this many items match.")
 @click.option("--require-match", type=click.IntRange(1, None), default=None, help="Require at least this many matched items.")
@@ -2657,6 +3111,9 @@ def organize_apply(
     name_suffix: str,
     replace_from: str | None,
     replace_to: str,
+    regex_from: str | None,
+    regex_to: str,
+    name_template: str | None,
     strip_names: bool,
     max_items: int | None,
     require_match: int | None,
@@ -2764,6 +3221,9 @@ def organize_apply(
             suffix=name_suffix,
             replace_from=replace_from,
             replace_to=replace_to,
+            regex_from=regex_from,
+            regex_to=regex_to,
+            name_template=name_template,
             strip_names=strip_names,
             skip_unchanged=skip_unchanged,
         )
@@ -2871,6 +3331,775 @@ def organize_apply(
 
 
 @cli.group()
+def report() -> None:
+    """Write reusable library and item reports."""
+
+
+@report.command("library")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html"]), default="auto", show_default=True)
+@pass_app
+def report_library(app: AppContext, output_file: Path, report_format: str) -> None:
+    document = {
+        "title": "CLI-Anything Eagle Library Report",
+        **build_library_summary(_library_info_data(app)),
+    }
+    resolved_format = _write_report(output_file, document, requested_format=report_format)
+    _emit_and_remember(
+        app,
+        "report library",
+        {
+            "status": "success",
+            "data": {
+                "saved_to": str(output_file),
+                "report_format": resolved_format,
+                **document,
+            },
+        },
+    )
+
+
+@report.command("tags")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--top", type=click.IntRange(1, None), default=50, show_default=True)
+@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html", "csv"]), default="auto", show_default=True)
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None)
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_filter_options
+@pass_app
+def report_tags(
+    app: AppContext,
+    output_file: Path,
+    top: int,
+    report_format: str,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    query = _query_or_collect_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    document = {
+        "title": "CLI-Anything Eagle Tag Report",
+        **_build_tag_stats(query["items"], top=top),
+        "query": query["query"],
+        "pages": query["pages"],
+    }
+    resolved_format = _write_report(output_file, document, requested_format=report_format)
+    _emit_and_remember(
+        app,
+        "report tags",
+        {
+            "status": "success",
+            "data": {
+                "saved_to": str(output_file),
+                "report_format": resolved_format,
+                **document,
+            },
+        },
+    )
+
+
+@report.command("folders")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--top", type=click.IntRange(1, None), default=50, show_default=True)
+@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html", "csv"]), default="auto", show_default=True)
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None)
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_filter_options
+@pass_app
+def report_folders(
+    app: AppContext,
+    output_file: Path,
+    top: int,
+    report_format: str,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    query = _query_or_collect_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    document = {
+        "title": "CLI-Anything Eagle Folder Report",
+        **_build_folder_stats(app, query["items"], top=top),
+        "query": query["query"],
+        "pages": query["pages"],
+    }
+    resolved_format = _write_report(output_file, document, requested_format=report_format)
+    _emit_and_remember(
+        app,
+        "report folders",
+        {
+            "status": "success",
+            "data": {
+                "saved_to": str(output_file),
+                "report_format": resolved_format,
+                **document,
+            },
+        },
+    )
+
+
+@report.command("trend")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--bucket", type=click.Choice(["month", "year"]), default="month", show_default=True)
+@click.option("--field", type=click.Choice(["modification", "created"]), default="modification", show_default=True)
+@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html", "csv"]), default="auto", show_default=True)
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None)
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_filter_options
+@pass_app
+def report_trend(
+    app: AppContext,
+    output_file: Path,
+    bucket: str,
+    field: str,
+    report_format: str,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    query = _query_or_collect_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    document = {
+        "title": "CLI-Anything Eagle Trend Report",
+        "bucket": bucket,
+        "field": field,
+        "total_items": len(query["items"]),
+        "rows": _trend_rows(query["items"], bucket=bucket, field=field),
+        "query": query["query"],
+        "pages": query["pages"],
+    }
+    resolved_format = _write_report(output_file, document, requested_format=report_format)
+    _emit_and_remember(
+        app,
+        "report trend",
+        {
+            "status": "success",
+            "data": {
+                "saved_to": str(output_file),
+                "report_format": resolved_format,
+                **document,
+            },
+        },
+    )
+
+
+@cli.group()
+def workflow() -> None:
+    """Declarative workflow commands."""
+
+
+@workflow.command("validate")
+@click.argument("workflow_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@pass_app
+def workflow_validate(app: AppContext, workflow_file: Path) -> None:
+    payload = _load_workflow(workflow_file)
+    validation = _validate_workflow_document(payload)
+    _emit_and_remember(
+        app,
+        "workflow validate",
+        {
+            "status": "success" if validation["valid"] else "invalid",
+            "data": {
+                "workflow_file": str(workflow_file),
+                **validation,
+            },
+        },
+    )
+
+
+@workflow.command("run")
+@click.argument("workflow_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--save-plan", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue bridge work without waiting for Eagle to process it.")
+@pass_app
+def workflow_run(
+    app: AppContext,
+    workflow_file: Path,
+    save_plan: Path | None,
+    bridge_timeout: float,
+    queue_only: bool,
+) -> None:
+    payload = _load_workflow(workflow_file)
+    validation = _validate_workflow_document(payload)
+    if not validation["valid"]:
+        raise click.ClickException("; ".join(validation["errors"]))
+    working_items, query = _workflow_items(app, payload)
+    step_results: list[dict[str, Any]] = []
+    aggregate_operations: list[dict[str, Any]] = []
+    for index, step in enumerate(payload.get("steps") or [], start=1):
+        action = step.get("action")
+        name = step.get("name") or f"step-{index}"
+        if action == "snapshot":
+            output_file = Path(step["output"])
+            document = _snapshot_document(
+                f"workflow:{name}",
+                working_items,
+                context={"workflow_file": str(workflow_file), "step": name},
+            )
+            if not app.dry_run:
+                _write_snapshot(output_file, document)
+            step_results.append(
+                {
+                    "name": name,
+                    "action": action,
+                    "saved_to": str(output_file),
+                    "item_count": len(working_items),
+                }
+            )
+            continue
+        if action == "export-items":
+            output_file = Path(step["output"])
+            requested_format = str(step.get("format", "auto"))
+            if not app.dry_run:
+                resolved_format = _write_items_export(output_file, working_items, requested_format)
+            else:
+                resolved_format = _infer_export_format(output_file, requested_format)
+            step_results.append(
+                {
+                    "name": name,
+                    "action": action,
+                    "saved_to": str(output_file),
+                    "format": resolved_format,
+                    "item_count": len(working_items),
+                }
+            )
+            continue
+        if action in {"report-tags", "report-folders", "report-trend"}:
+            output_file = Path(step["output"])
+            requested_format = str(step.get("format", "auto"))
+            if action == "report-tags":
+                document = {
+                    "title": f"Workflow Tag Report: {name}",
+                    **_build_tag_stats(working_items, top=int(step.get("top", 50))),
+                }
+            elif action == "report-folders":
+                document = {
+                    "title": f"Workflow Folder Report: {name}",
+                    **_build_folder_stats(app, working_items, top=int(step.get("top", 50))),
+                }
+            else:
+                bucket = str(step.get("bucket", "month"))
+                field = str(step.get("field", "modification"))
+                document = {
+                    "title": f"Workflow Trend Report: {name}",
+                    "bucket": bucket,
+                    "field": field,
+                    "total_items": len(working_items),
+                    "rows": _trend_rows(working_items, bucket=bucket, field=field),
+                }
+            if not app.dry_run:
+                resolved_format = _write_report(output_file, document, requested_format=requested_format)
+            else:
+                resolved_format = _infer_report_format(output_file, requested_format)
+            step_results.append(
+                {
+                    "name": name,
+                    "action": action,
+                    "saved_to": str(output_file),
+                    "format": resolved_format,
+                }
+            )
+            continue
+        if action == "bulk-update":
+            operations, skipped = _build_item_update_operations(
+                working_items,
+                set_tags=list(step.get("set_tags") or []),
+                add_tags=list(step.get("add_tags") or []),
+                annotation=step.get("annotation"),
+                source_url=step.get("url"),
+                star=step.get("star"),
+                skip_unchanged=bool(step.get("skip_unchanged", True)),
+            )
+            aggregate_operations.extend(operations)
+            _simulate_http_operations(working_items, operations)
+            step_results.append(
+                {
+                    "name": name,
+                    "action": action,
+                    "operation_count": len(operations),
+                    "skipped_count": len(skipped),
+                }
+            )
+            continue
+        if action == "rename":
+            rename_operations, skipped = _build_rename_operations(
+                working_items,
+                prefix=str(step.get("prefix", "")),
+                suffix=str(step.get("suffix", "")),
+                replace_from=step.get("replace_from"),
+                replace_to=str(step.get("replace_to", "")),
+                regex_from=step.get("regex_from"),
+                regex_to=str(step.get("regex_to", "")),
+                name_template=step.get("name_template"),
+                strip_names=bool(step.get("strip")),
+                skip_unchanged=bool(step.get("skip_unchanged", True)),
+            )
+            if rename_operations:
+                aggregate_operations.append(
+                    _make_bridge_operation(
+                        "rename_items",
+                        {"operations": rename_operations},
+                        description=f"Workflow rename step: {name}",
+                    )
+                )
+            _simulate_rename_operations(working_items, rename_operations)
+            step_results.append(
+                {
+                    "name": name,
+                    "action": action,
+                    "operation_count": len(rename_operations),
+                    "skipped_count": len(skipped),
+                }
+            )
+            continue
+        if action == "move":
+            ensure_result, target_folder = _resolve_move_target(
+                app,
+                target_folder_id=step.get("target_folder_id"),
+                target_folder_name=step.get("target_folder_name"),
+                target_folder_path=step.get("target_folder_path"),
+                ensure_target_path=step.get("ensure_target_path"),
+            )
+            move_operations, skipped = _build_move_operations(
+                working_items,
+                target_folder_id=target_folder.id if target_folder is not None else "",
+                target_folder_path=target_folder.path if target_folder is not None else "",
+                skip_unchanged=bool(step.get("skip_unchanged", True)),
+            )
+            if move_operations:
+                aggregate_operations.append(
+                    _make_bridge_operation(
+                        "move_items",
+                        {"operations": move_operations},
+                        description=f"Workflow move step: {name}",
+                    )
+                )
+            _simulate_move_operations(working_items, move_operations)
+            step_results.append(
+                {
+                    "name": name,
+                    "action": action,
+                    "target_folder": _folder_row(target_folder),
+                    "ensure_result": ensure_result,
+                    "operation_count": len(move_operations),
+                    "skipped_count": len(skipped),
+                }
+            )
+            continue
+    if save_plan is not None:
+        _write_plan(
+            save_plan,
+            _plan_document(
+                "workflow run",
+                aggregate_operations,
+                context={
+                    "workflow_file": str(workflow_file),
+                    "selection_query": query["query"],
+                    "step_count": len(payload.get("steps") or []),
+                },
+            ),
+        )
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "workflow run",
+            {
+                "status": "dry-run",
+                "data": {
+                    "workflow_file": str(workflow_file),
+                    "selected_items": len(working_items),
+                    "steps": step_results,
+                    "operation_count": len(aggregate_operations),
+                    "saved_plan": str(save_plan) if save_plan is not None else None,
+                },
+            },
+        )
+        return
+    execution_results = _execute_operations(
+        app,
+        aggregate_operations,
+        bridge_timeout=bridge_timeout,
+        queue_only=queue_only,
+    )
+    _emit_and_remember(
+        app,
+        "workflow run",
+        {
+            "status": "success",
+            "data": {
+                "workflow_file": str(workflow_file),
+                "selected_items": len(working_items),
+                "steps": step_results,
+                "saved_plan": str(save_plan) if save_plan is not None else None,
+                "operation_count": len(aggregate_operations),
+                "results": execution_results,
+            },
+        },
+    )
+
+
+@cli.group()
+def ingest() -> None:
+    """Manifest-driven import commands."""
+
+
+@ingest.command("manifest")
+@click.argument("manifest_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--folder-id", default=None)
+@click.option("--folder-name", default=None)
+@click.option("--folder-path", default=None)
+@pass_app
+def ingest_manifest(
+    app: AppContext,
+    manifest_file: Path,
+    folder_id: str | None,
+    folder_name: str | None,
+    folder_path: str | None,
+) -> None:
+    target_folder = _resolve_folder_selector(
+        app,
+        folder_id=folder_id,
+        folder_name=folder_name,
+        folder_path=folder_path,
+        purpose="target folder",
+        required=False,
+    )
+    payload = _load_data_file(manifest_file)
+    if isinstance(payload, dict):
+        items = payload.get("items") or []
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        raise click.ClickException("Manifest file must contain an items list or an object with an items field.")
+    if not isinstance(items, list) or not items:
+        raise click.ClickException("Manifest file does not contain any items.")
+    if all(isinstance(item, dict) and item.get("path") for item in items):
+        endpoint = "/api/item/addFromPaths"
+        action = lambda: app.client.item_add_from_paths(items, folder_id=target_folder.id if target_folder else None)
+    elif all(isinstance(item, dict) and item.get("url") for item in items):
+        endpoint = "/api/item/addFromURLs"
+        action = lambda: app.client.item_add_from_urls(items, folder_id=target_folder.id if target_folder else None)
+    else:
+        raise click.ClickException("Manifest items must all have either 'path' or 'url'.")
+    request_payload: dict[str, Any] = {"items": items}
+    if target_folder is not None:
+        request_payload["folderId"] = target_folder.id
+    _run_mutation(
+        app,
+        "ingest manifest",
+        endpoint=endpoint,
+        payload=request_payload,
+        action=action,
+        resolved={
+            "folder": _folder_row(target_folder) if target_folder is not None else None,
+            "manifest_file": str(manifest_file),
+            "item_count": len(items),
+        },
+    )
+
+
+@cli.group()
+def watch() -> None:
+    """Stateful import watcher commands."""
+
+
+@watch.command("import-dir")
+@click.argument("directory", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--state-file", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--recursive", is_flag=True, help="Walk subdirectories recursively.")
+@click.option("--glob", "globs", multiple=True, help="Repeatable glob filter. Defaults to '*'.")
+@click.option("--ext", "extensions", multiple=True, help="Repeatable file extension filter, such as png or jpg.")
+@click.option("--hidden", "include_hidden", is_flag=True, help="Include dotfiles and files inside hidden directories.")
+@click.option("--limit", type=click.IntRange(1, None), default=None, help="Maximum number of files to add.")
+@click.option("--website", default=None)
+@click.option("--tag", "tags", multiple=True)
+@click.option("--annotation", default=None)
+@click.option("--folder-id", default=None)
+@click.option("--folder-name", default=None, help="Exact target folder name.")
+@click.option("--folder-path", default=None, help="Exact target folder path.")
+@click.option("--name-template", default=None)
+@click.option("--tag-from-path", is_flag=True)
+@click.option("--tag-from-name", is_flag=True)
+@click.option("--save-manifest", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@pass_app
+def watch_import_dir(
+    app: AppContext,
+    directory: Path,
+    state_file: Path | None,
+    recursive: bool,
+    globs: tuple[str, ...],
+    extensions: tuple[str, ...],
+    include_hidden: bool,
+    limit: int | None,
+    website: str | None,
+    tags: tuple[str, ...],
+    annotation: str | None,
+    folder_id: str | None,
+    folder_name: str | None,
+    folder_path: str | None,
+    name_template: str | None,
+    tag_from_path: bool,
+    tag_from_name: bool,
+    save_manifest: Path | None,
+) -> None:
+    target_folder = _resolve_folder_selector(
+        app,
+        folder_id=folder_id,
+        folder_name=folder_name,
+        folder_path=folder_path,
+        purpose="target folder",
+        required=False,
+    )
+    files = _collect_files_from_directory(
+        directory,
+        recursive=recursive,
+        globs=globs,
+        extensions=extensions,
+        include_hidden=include_hidden,
+        limit=limit,
+    )
+    previous_state = _load_watch_state(state_file)
+    previous_files = previous_state.get("files") or {}
+    current_signatures = {_file_signature(path)["path"]: _file_signature(path) for path in files}
+    changed_files = [path for path in files if previous_files.get(str(path)) != current_signatures[str(path)]]
+    items = _build_add_dir_items(
+        directory,
+        changed_files,
+        website=website,
+        tags=tags,
+        annotation=annotation,
+        name_template=name_template,
+        tag_from_path=tag_from_path,
+        tag_from_name=tag_from_name,
+    )
+    if save_manifest is not None:
+        _write_manifest(
+            save_manifest,
+            {
+                "kind": "eagle-cli-add-paths-manifest",
+                "version": 1,
+                "source_directory": str(directory),
+                "watched": True,
+                "changed_count": len(items),
+                "items": items,
+            },
+        )
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "watch import-dir",
+            {
+                "status": "dry-run",
+                "data": {
+                    "directory": str(directory),
+                    "tracked_count": len(current_signatures),
+                    "changed_count": len(items),
+                    "changed_paths": [str(path) for path in changed_files[:100]],
+                    "saved_manifest": str(save_manifest) if save_manifest is not None else None,
+                },
+            },
+        )
+        return
+    response = {"status": "success", "data": {"status": "noop"}} if not items else app.client.item_add_from_paths(
+        items,
+        folder_id=target_folder.id if target_folder else None,
+    )
+    saved_state = _save_watch_state(
+        state_file,
+        {
+            "version": 1,
+            "directory": str(directory),
+            "updated_at": _utc_now(),
+            "files": current_signatures,
+        },
+    )
+    _emit_and_remember(
+        app,
+        "watch import-dir",
+        {
+            "status": "success",
+            "data": {
+                "directory": str(directory),
+                "tracked_count": len(current_signatures),
+                "changed_count": len(items),
+                "saved_manifest": str(save_manifest) if save_manifest is not None else None,
+                "saved_state": str(saved_state),
+                "folder": _folder_row(target_folder) if target_folder is not None else None,
+                "response": response,
+            },
+        },
+    )
+
+
+@cli.group()
+def completion() -> None:
+    """Shell completion helpers."""
+
+
+@completion.command("export")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--shell", type=click.Choice(["bash", "zsh", "fish"]), default="zsh", show_default=True)
+@pass_app
+def completion_export(app: AppContext, output_file: Path, shell: str) -> None:
+    script = _completion_script(shell)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(f"{script}\n", encoding="utf-8")
+    _emit_and_remember(
+        app,
+        "completion export",
+        {
+            "status": "success",
+            "data": {
+                "shell": shell,
+                "saved_to": str(output_file),
+                "script": script,
+            },
+        },
+    )
+
+
+@cli.group()
+def schema() -> None:
+    """Built-in document schema helpers."""
+
+
+@schema.command("show")
+@click.argument("kind", type=click.Choice(["plan", "snapshot", "selection", "workflow", "report"]))
+@click.option("--save-to", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@pass_app
+def schema_show(app: AppContext, kind: str, save_to: Path | None) -> None:
+    document = _schema_document(kind)
+    if save_to is not None:
+        save_to.parent.mkdir(parents=True, exist_ok=True)
+        save_to.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    _emit_and_remember(
+        app,
+        "schema show",
+        {
+            "status": "success",
+            "data": {
+                "kind": kind,
+                "saved_to": str(save_to) if save_to is not None else None,
+                "schema": document,
+            },
+        },
+    )
+
+
+@cli.group()
 def plan() -> None:
     """Operation plan commands."""
 
@@ -2908,24 +4137,25 @@ def plan_save_last(app: AppContext, plan_file: Path) -> None:
 @click.argument("plan_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
 @click.option("--queue-only", is_flag=True, help="Queue bridge work without waiting for Eagle to process it.")
+@click.option("--save-results", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write the plan-apply result document to a JSON file.")
 @pass_app
-def plan_apply(app: AppContext, plan_file: Path, bridge_timeout: float, queue_only: bool) -> None:
-    data = json.loads(plan_file.read_text(encoding="utf-8"))
+def plan_apply(app: AppContext, plan_file: Path, bridge_timeout: float, queue_only: bool, save_results: Path | None) -> None:
+    data = _load_data_file(plan_file)
     operations = _extract_operations_from_document(data)
     if not operations:
         raise click.ClickException("No operations found in the plan file.")
     if app.dry_run:
-        _emit_and_remember(
-            app,
-            "plan apply",
-            {
-                "status": "dry-run",
-                "data": {
-                    "plan_file": str(plan_file),
-                    "operations": operations,
-                },
+        response = {
+            "status": "dry-run",
+            "data": {
+                "plan_file": str(plan_file),
+                "operations": operations,
+                "saved_results": str(save_results) if save_results is not None else None,
             },
-        )
+        }
+        if save_results is not None:
+            _write_manifest(save_results, response)
+        _emit_and_remember(app, "plan apply", response)
         return
 
     results = []
@@ -2961,15 +4191,1806 @@ def plan_apply(app: AppContext, plan_file: Path, bridge_timeout: float, queue_on
                 }
             )
 
+    response = {
+        "status": "success",
+        "data": {
+            "plan_file": str(plan_file),
+            "applied_count": len(results),
+            "results": results,
+            "saved_results": str(save_results) if save_results is not None else None,
+        },
+    }
+    if save_results is not None:
+        _write_manifest(save_results, response)
+    _emit_and_remember(app, "plan apply", response)
+
+
+@plan.command("merge")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.argument("plan_files", nargs=-1, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@pass_app
+def plan_merge(app: AppContext, output_file: Path, plan_files: tuple[Path, ...]) -> None:
+    if not plan_files:
+        raise click.ClickException("Provide at least one source plan file to merge.")
+    merged_operations: list[dict[str, Any]] = []
+    source_rows = []
+    for plan_path in plan_files:
+        data = _load_data_file(plan_path)
+        operations = _extract_operations_from_document(data)
+        merged_operations.extend(operations)
+        source_rows.append(
+            {
+                "path": str(plan_path),
+                "command": data.get("command"),
+                "operation_count": len(operations),
+            }
+        )
+    document = _plan_document("plan merge", merged_operations, context={"sources": source_rows})
+    _write_plan(output_file, document)
     _emit_and_remember(
         app,
-        "plan apply",
+        "plan merge",
+        {
+            "status": "success",
+            "data": {
+                "saved_to": str(output_file),
+                "source_count": len(plan_files),
+                "operation_count": len(merged_operations),
+                "sources": source_rows,
+            },
+        },
+    )
+
+
+@plan.command("split")
+@click.argument("plan_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("output_dir", type=click.Path(file_okay=False, path_type=Path))
+@click.option("--max-operations", type=click.IntRange(1, None), default=100, show_default=True)
+@pass_app
+def plan_split(app: AppContext, plan_file: Path, output_dir: Path, max_operations: int) -> None:
+    data = _load_data_file(plan_file)
+    operations = _extract_operations_from_document(data)
+    if not operations:
+        raise click.ClickException("No operations found in the plan file.")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    saved_paths = []
+    for index, chunk in enumerate(_chunked(operations, max_operations), start=1):
+        chunk_path = output_dir / f"{plan_file.stem}-{index:03d}.json"
+        _write_plan(
+            chunk_path,
+            _plan_document(
+                f"{data.get('command') or 'plan split'} chunk {index}",
+                chunk,
+                context={
+                    "source_plan": str(plan_file),
+                    "chunk_index": index,
+                    "chunk_count": len(chunk),
+                },
+            ),
+        )
+        saved_paths.append(str(chunk_path))
+    _emit_and_remember(
+        app,
+        "plan split",
         {
             "status": "success",
             "data": {
                 "plan_file": str(plan_file),
-                "applied_count": len(results),
+                "output_dir": str(output_dir),
+                "chunk_count": len(saved_paths),
+                "paths": saved_paths,
+            },
+        },
+    )
+
+
+@plan.command("filter")
+@click.argument("plan_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--kind", type=click.Choice(["http", "bridge"]), default=None)
+@click.option("--method", default=None)
+@click.option("--endpoint", default=None)
+@click.option("--action", default=None)
+@click.option("--description-contains", default=None)
+@pass_app
+def plan_filter(
+    app: AppContext,
+    plan_file: Path,
+    output_file: Path,
+    kind: str | None,
+    method: str | None,
+    endpoint: str | None,
+    action: str | None,
+    description_contains: str | None,
+) -> None:
+    data = _load_data_file(plan_file)
+    operations = _extract_operations_from_document(data)
+    filtered = []
+    for operation in operations:
+        if kind and operation.get("kind", "http") != kind:
+            continue
+        if method and str(operation.get("method") or "").casefold() != method.casefold():
+            continue
+        if endpoint and endpoint not in str(operation.get("endpoint") or ""):
+            continue
+        if action and action not in str(operation.get("action") or ""):
+            continue
+        if description_contains and description_contains.casefold() not in str(operation.get("description") or "").casefold():
+            continue
+        filtered.append(operation)
+    _write_plan(
+        output_file,
+        _plan_document(
+            "plan filter",
+            filtered,
+            context={
+                "source_plan": str(plan_file),
+                "filters": {
+                    "kind": kind,
+                    "method": method,
+                    "endpoint": endpoint,
+                    "action": action,
+                    "description_contains": description_contains,
+                },
+            },
+        ),
+    )
+    _emit_and_remember(
+        app,
+        "plan filter",
+        {
+            "status": "success",
+            "data": {
+                "source_plan": str(plan_file),
+                "saved_to": str(output_file),
+                "operation_count": len(filtered),
+            },
+        },
+    )
+
+
+@plan.command("explain")
+@click.argument("plan_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@pass_app
+def plan_explain(app: AppContext, plan_file: Path) -> None:
+    data = _load_data_file(plan_file)
+    operations = _extract_operations_from_document(data)
+    rows = []
+    for index, operation in enumerate(operations, start=1):
+        rows.append(
+            {
+                "index": index,
+                "kind": operation.get("kind", "http"),
+                "method": operation.get("method", ""),
+                "endpoint": operation.get("endpoint", ""),
+                "action": operation.get("action", ""),
+                "description": operation.get("description", ""),
+            }
+        )
+    _emit_and_remember(
+        app,
+        "plan explain",
+        {
+            "status": "success",
+            "data": {
+                "plan_file": str(plan_file),
+                "command": data.get("command"),
+                "rows": rows,
+            },
+        },
+    )
+
+
+@plan.command("validate")
+@click.argument("plan_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@pass_app
+def plan_validate(app: AppContext, plan_file: Path) -> None:
+    data = _load_data_file(plan_file)
+    operations = data.get("operations") if isinstance(data, dict) else None
+    errors: list[str] = []
+    if not isinstance(data, dict):
+        errors.append("Plan document must be a JSON or YAML object.")
+    else:
+        if data.get("kind") not in (None, "eagle-cli-plan"):
+            errors.append("Plan kind must be 'eagle-cli-plan' when provided.")
+        if not isinstance(operations, list):
+            errors.append("Plan document must contain an 'operations' array.")
+        else:
+            for index, operation in enumerate(operations):
+                if not isinstance(operation, dict):
+                    errors.append(f"Operation {index} must be an object.")
+                    continue
+                if operation.get("kind") == "bridge":
+                    if not operation.get("action"):
+                        errors.append(f"Bridge operation {index} is missing 'action'.")
+                else:
+                    if not operation.get("endpoint"):
+                        errors.append(f"HTTP operation {index} is missing 'endpoint'.")
+    _emit_and_remember(
+        app,
+        "plan validate",
+        {
+            "status": "success",
+            "data": {
+                "plan_file": str(plan_file),
+                "valid": not errors,
+                "errors": errors,
+                "operation_count": len(_extract_operations_from_document(data)) if isinstance(data, dict) else 0,
+            },
+        },
+    )
+
+
+@plan.command("rollback-from-results")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.argument("results_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--restore-names/--no-restore-names", default=True, show_default=True)
+@click.option("--restore-folders/--no-restore-folders", default=True, show_default=True)
+@click.option("--skip-unchanged", is_flag=True)
+@click.option("--save-matches", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@pass_app
+def plan_rollback_from_results(
+    app: AppContext,
+    output_file: Path,
+    results_file: Path,
+    restore_names: bool,
+    restore_folders: bool,
+    skip_unchanged: bool,
+    save_matches: Path | None,
+) -> None:
+    results_payload = _load_data_file(results_file)
+    snapshot_value = _find_saved_snapshot_path(results_payload)
+    if snapshot_value is None:
+        raise click.ClickException("Could not find any saved_snapshot path in the results document.")
+    snapshot_file = Path(snapshot_value).expanduser()
+    document = _load_snapshot(snapshot_file)
+    snapshot_items = list(document.get("items") or [])
+    item_ids = tuple(str(item.get("id")) for item in snapshot_items if str(item.get("id")))
+    current_items = (
+        _collect_target_items(
+            app,
+            item_ids=item_ids,
+            limit=len(item_ids) or 1,
+            offset=0,
+            order_by=None,
+            keyword=None,
+            ext=None,
+            tags=(),
+            folders=(),
+            folder_names=(),
+            folder_paths=(),
+        )
+        if item_ids
+        else []
+    )
+    if save_matches is not None:
+        _write_items_export(save_matches, current_items, "auto")
+    current_by_id = {str(item.get("id")): item for item in current_items}
+    metadata_operations: list[dict[str, Any]] = []
+    rename_operations: list[dict[str, Any]] = []
+    move_operations: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for snapshot_item_data in snapshot_items:
+        item_id = str(snapshot_item_data.get("id") or "")
+        if not item_id or item_id not in current_by_id:
+            skipped.append({"id": item_id, "reason": "missing"})
+            continue
+        current_item = current_by_id[item_id]
+        metadata_payload = {
+            "id": item_id,
+            "tags": list(snapshot_item_data.get("tags") or []),
+            "annotation": snapshot_item_data.get("annotation"),
+            "url": snapshot_item_data.get("url"),
+        }
+        if snapshot_item_data.get("star") is not None:
+            metadata_payload["star"] = snapshot_item_data.get("star")
+        changed_fields = _changed_item_fields(current_item, metadata_payload)
+        if changed_fields or not skip_unchanged:
+            metadata_operations.append(
+                {
+                    "method": "POST",
+                    "endpoint": "/api/item/update",
+                    "payload": metadata_payload,
+                    "changed_fields": changed_fields,
+                    "item": {"id": item_id, "name": current_item.get("name")},
+                }
+            )
+        if restore_names:
+            next_name = str(snapshot_item_data.get("name") or "")
+            current_name = str(current_item.get("name") or "")
+            if next_name and next_name != current_name:
+                rename_operations.append({"item_id": item_id, "name": current_name, "new_name": next_name})
+        if restore_folders:
+            next_folders = [str(folder_id) for folder_id in snapshot_item_data.get("folders") or [] if str(folder_id)]
+            current_folders = [str(folder_id) for folder_id in current_item.get("folders") or [] if str(folder_id)]
+            if next_folders != current_folders:
+                move_operations.append(
+                    {
+                        "item_id": item_id,
+                        "name": current_item.get("name"),
+                        "current_folders": current_folders,
+                        "folder_ids": next_folders,
+                    }
+                )
+    operations = _snapshot_restore_operations(metadata_operations, rename_operations, move_operations)
+    _write_plan(
+        output_file,
+        _plan_document(
+            "plan rollback-from-results",
+            operations,
+            context={
+                "results_file": str(results_file),
+                "snapshot_file": str(snapshot_file),
+                "restore_names": restore_names,
+                "restore_folders": restore_folders,
+                "skip_unchanged": skip_unchanged,
+            },
+        ),
+    )
+    _emit_and_remember(
+        app,
+        "plan rollback-from-results",
+        {
+            "status": "success",
+            "data": {
+                "saved_to": str(output_file),
+                "results_file": str(results_file),
+                "snapshot_file": str(snapshot_file),
+                "metadata_operation_count": len(metadata_operations),
+                "rename_operation_count": len(rename_operations),
+                "move_operation_count": len(move_operations),
+                "skipped": skipped,
+                "saved_matches": str(save_matches) if save_matches is not None else None,
+            },
+        },
+    )
+
+
+@cli.group()
+def tag() -> None:
+    """Tag analysis and transformation commands."""
+
+
+@tag.command("stats")
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--top", type=click.IntRange(1, None), default=15, show_default=True)
+@item_filter_options
+@pass_app
+def tag_stats(
+    app: AppContext,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    top: int,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    query = _query_or_collect_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    payload = _build_tag_stats(query["items"], top=top)
+    payload["query"] = query["query"]
+    payload["pages"] = query["pages"]
+    _emit_and_remember(app, "tag stats", {"status": "success", "data": payload})
+
+
+@tag.command("audit")
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--top", type=click.IntRange(1, None), default=15, show_default=True)
+@item_filter_options
+@pass_app
+def tag_audit(
+    app: AppContext,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    top: int,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    query = _query_or_collect_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    payload = _build_tag_audit(query["items"], top=top)
+    payload["query"] = query["query"]
+    payload["pages"] = query["pages"]
+    _emit_and_remember(app, "tag audit", {"status": "success", "data": payload})
+
+
+@tag.command("rename")
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to update.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--limit", type=int, default=200, show_default=True)
+@click.option("--offset", type=int, default=0, show_default=True)
+@click.option("--order-by", default=None)
+@click.option("--keyword", default=None)
+@click.option("--ext", default=None)
+@click.option("--tag", "tags", multiple=True, help="Filter by existing tags.")
+@click.option("--folder", "folders", multiple=True, help="Filter by folder IDs.")
+@click.option("--folder-name", "folder_names", multiple=True, help="Filter by exact folder names.")
+@click.option("--folder-path", "folder_paths", multiple=True, help="Filter by exact folder paths.")
+@click.option("--from-tag", required=True)
+@click.option("--to-tag", required=True)
+@click.option("--max-items", type=click.IntRange(1, None), default=None)
+@click.option("--require-match", type=click.IntRange(1, None), default=None)
+@click.option("--skip-unchanged", is_flag=True)
+@click.option("--save-matches", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--save-plan", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@pass_app
+def tag_rename(
+    app: AppContext,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+    from_tag: str,
+    to_tag: str,
+    max_items: int | None,
+    require_match: int | None,
+    skip_unchanged: bool,
+    save_matches: Path | None,
+    save_plan: Path | None,
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    items = _collect_target_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    matched_count = _apply_item_guardrails(items, max_items=max_items, require_match=require_match, save_matches=save_matches)
+
+    def transform(item: dict[str, Any]) -> list[str]:
+        next_tags: list[str] = []
+        for raw_tag in item.get("tags") or []:
+            value = to_tag if str(raw_tag) == from_tag else str(raw_tag)
+            if value and value not in next_tags:
+                next_tags.append(value)
+        return next_tags
+
+    operations, skipped = _build_item_update_operations(items, skip_unchanged=skip_unchanged, tag_transform=transform)
+    if save_plan is not None:
+        _save_plan_if_requested(
+            save_plan,
+            "tag rename",
+            operations,
+            context={"from_tag": from_tag, "to_tag": to_tag, "matched_count": matched_count},
+        )
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "tag rename",
+            {
+                "status": "dry-run",
+                "data": {
+                    "matched_count": matched_count,
+                    "operation_count": len(operations),
+                    "operations": operations,
+                    "skipped": skipped,
+                    "saved_plan": str(save_plan) if save_plan is not None else None,
+                    "saved_matches": str(save_matches) if save_matches is not None else None,
+                },
+            },
+        )
+        return
+    results = _execute_operations(app, operations)
+    _emit_and_remember(
+        app,
+        "tag rename",
+        {
+            "status": "success",
+            "data": {
+                "matched_count": matched_count,
+                "operation_count": len(operations),
+                "skipped": skipped,
                 "results": results,
+                "saved_plan": str(save_plan) if save_plan is not None else None,
+                "saved_matches": str(save_matches) if save_matches is not None else None,
+            },
+        },
+    )
+
+
+@tag.command("normalize")
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to update.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--limit", type=int, default=200, show_default=True)
+@click.option("--offset", type=int, default=0, show_default=True)
+@click.option("--order-by", default=None)
+@click.option("--keyword", default=None)
+@click.option("--ext", default=None)
+@click.option("--tag", "tags", multiple=True, help="Filter by existing tags.")
+@click.option("--folder", "folders", multiple=True, help="Filter by folder IDs.")
+@click.option("--folder-name", "folder_names", multiple=True, help="Filter by exact folder names.")
+@click.option("--folder-path", "folder_paths", multiple=True, help="Filter by exact folder paths.")
+@click.option("--lowercase", is_flag=True)
+@click.option("--trim", is_flag=True)
+@click.option("--collapse-spaces", is_flag=True)
+@click.option("--max-items", type=click.IntRange(1, None), default=None)
+@click.option("--require-match", type=click.IntRange(1, None), default=None)
+@click.option("--skip-unchanged", is_flag=True)
+@click.option("--save-matches", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--save-plan", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@pass_app
+def tag_normalize(
+    app: AppContext,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+    lowercase: bool,
+    trim: bool,
+    collapse_spaces: bool,
+    max_items: int | None,
+    require_match: int | None,
+    skip_unchanged: bool,
+    save_matches: Path | None,
+    save_plan: Path | None,
+) -> None:
+    if not any([lowercase, trim, collapse_spaces]):
+        raise click.ClickException("Provide at least one normalization flag such as --lowercase, --trim, or --collapse-spaces.")
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    items = _collect_target_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    matched_count = _apply_item_guardrails(items, max_items=max_items, require_match=require_match, save_matches=save_matches)
+
+    def transform(item: dict[str, Any]) -> list[str]:
+        next_tags: list[str] = []
+        for raw_tag in item.get("tags") or []:
+            value = _normalize_tag_value(str(raw_tag), lowercase=lowercase, trim=trim, collapse_spaces=collapse_spaces)
+            if value and value not in next_tags:
+                next_tags.append(value)
+        return next_tags
+
+    operations, skipped = _build_item_update_operations(items, skip_unchanged=skip_unchanged, tag_transform=transform)
+    if save_plan is not None:
+        _save_plan_if_requested(
+            save_plan,
+            "tag normalize",
+            operations,
+            context={
+                "matched_count": matched_count,
+                "lowercase": lowercase,
+                "trim": trim,
+                "collapse_spaces": collapse_spaces,
+            },
+        )
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "tag normalize",
+            {
+                "status": "dry-run",
+                "data": {
+                    "matched_count": matched_count,
+                    "operation_count": len(operations),
+                    "operations": operations,
+                    "skipped": skipped,
+                    "saved_plan": str(save_plan) if save_plan is not None else None,
+                },
+            },
+        )
+        return
+    results = _execute_operations(app, operations)
+    _emit_and_remember(
+        app,
+        "tag normalize",
+        {
+            "status": "success",
+            "data": {
+                "matched_count": matched_count,
+                "operation_count": len(operations),
+                "skipped": skipped,
+                "results": results,
+                "saved_plan": str(save_plan) if save_plan is not None else None,
+            },
+        },
+    )
+
+
+@tag.command("alias-map-apply")
+@click.argument("alias_map_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to update.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--limit", type=int, default=200, show_default=True)
+@click.option("--offset", type=int, default=0, show_default=True)
+@click.option("--order-by", default=None)
+@click.option("--keyword", default=None)
+@click.option("--ext", default=None)
+@click.option("--tag", "tags", multiple=True, help="Filter by existing tags.")
+@click.option("--folder", "folders", multiple=True, help="Filter by folder IDs.")
+@click.option("--folder-name", "folder_names", multiple=True, help="Filter by exact folder names.")
+@click.option("--folder-path", "folder_paths", multiple=True, help="Filter by exact folder paths.")
+@click.option("--lowercase", is_flag=True)
+@click.option("--trim", is_flag=True)
+@click.option("--collapse-spaces", is_flag=True)
+@click.option("--max-items", type=click.IntRange(1, None), default=None)
+@click.option("--require-match", type=click.IntRange(1, None), default=None)
+@click.option("--skip-unchanged", is_flag=True)
+@click.option("--save-matches", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--save-plan", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@pass_app
+def tag_alias_map_apply(
+    app: AppContext,
+    alias_map_file: Path,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+    lowercase: bool,
+    trim: bool,
+    collapse_spaces: bool,
+    max_items: int | None,
+    require_match: int | None,
+    skip_unchanged: bool,
+    save_matches: Path | None,
+    save_plan: Path | None,
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    items = _collect_target_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    matched_count = _apply_item_guardrails(items, max_items=max_items, require_match=require_match, save_matches=save_matches)
+    alias_map = _load_alias_map(alias_map_file)
+    transform = _tag_transform_from_alias_map(
+        alias_map,
+        lowercase=lowercase,
+        trim=trim,
+        collapse_spaces=collapse_spaces,
+    )
+    operations, skipped = _build_item_update_operations(items, skip_unchanged=skip_unchanged, tag_transform=transform)
+    if save_plan is not None:
+        _save_plan_if_requested(
+            save_plan,
+            "tag alias-map-apply",
+            operations,
+            context={
+                "matched_count": matched_count,
+                "alias_map_file": str(alias_map_file),
+                "alias_count": len(alias_map),
+            },
+        )
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "tag alias-map-apply",
+            {
+                "status": "dry-run",
+                "data": {
+                    "matched_count": matched_count,
+                    "operation_count": len(operations),
+                    "operations": operations,
+                    "skipped": skipped,
+                    "alias_map_file": str(alias_map_file),
+                    "saved_plan": str(save_plan) if save_plan is not None else None,
+                },
+            },
+        )
+        return
+    results = _execute_operations(app, operations)
+    _emit_and_remember(
+        app,
+        "tag alias-map-apply",
+        {
+            "status": "success",
+            "data": {
+                "matched_count": matched_count,
+                "operation_count": len(operations),
+                "skipped": skipped,
+                "results": results,
+                "alias_map_file": str(alias_map_file),
+                "saved_plan": str(save_plan) if save_plan is not None else None,
+            },
+        },
+    )
+
+
+@cli.group("select")
+def select_group() -> None:
+    """Saved selection set commands."""
+
+
+@select_group.command("list")
+@pass_app
+def select_list(app: AppContext) -> None:
+    _emit_and_remember(app, "select list", {"status": "success", "data": _list_selections()})
+
+
+@select_group.command("save")
+@click.argument("name")
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to save.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_filter_options
+@pass_app
+def select_save(
+    app: AppContext,
+    name: str,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    items = _collect_target_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    saved_ids = [str(item.get("id")) for item in items if str(item.get("id"))]
+    path = _save_selection(
+        name,
+        saved_ids,
+        context={
+            "selector": _item_selector_context(
+                item_ids=resolved_item_ids,
+                fetch_all=fetch_all,
+                limit=limit,
+                offset=offset,
+                order_by=order_by,
+                keyword=keyword,
+                ext=ext,
+                tags=tags,
+                folders=folders,
+                folder_names=folder_names,
+                folder_paths=folder_paths,
+            ),
+        },
+    )
+    _emit_and_remember(
+        app,
+        "select save",
+        {
+            "status": "success",
+            "data": {
+                "name": name,
+                "saved_to": str(path),
+                "item_count": len(saved_ids),
+                "sample_ids": saved_ids[:10],
+            },
+        },
+    )
+
+
+@select_group.command("show")
+@click.argument("name")
+@pass_app
+def select_show(app: AppContext, name: str) -> None:
+    _emit_and_remember(app, "select show", {"status": "success", "data": _load_selection(name)})
+
+
+@select_group.command("delete")
+@click.argument("name")
+@pass_app
+def select_delete(app: AppContext, name: str) -> None:
+    if not _delete_selection(name):
+        raise click.ClickException(f"Unknown selection: {name}")
+    _emit_and_remember(app, "select delete", {"status": "success", "data": {"deleted": name}})
+
+
+@select_group.command("sample")
+@click.argument("name")
+@click.option("--count", type=click.IntRange(1, None), default=10, show_default=True)
+@click.option("--offset", type=click.IntRange(0, None), default=0, show_default=True)
+@click.option("--resolve", is_flag=True, help="Resolve the sampled IDs to full Eagle item records.")
+@pass_app
+def select_sample(app: AppContext, name: str, count: int, offset: int, resolve: bool) -> None:
+    payload = _load_selection(name)
+    item_ids = [str(item_id) for item_id in payload.get("item_ids") or [] if str(item_id)]
+    sample_ids = item_ids[offset : offset + count]
+    rows: Any
+    if resolve and sample_ids:
+        rows = _collect_target_items(
+            app,
+            item_ids=tuple(sample_ids),
+            limit=len(sample_ids),
+            offset=0,
+            order_by=None,
+            keyword=None,
+            ext=None,
+            tags=(),
+            folders=(),
+            folder_names=(),
+            folder_paths=(),
+        )
+    else:
+        rows = [{"index": offset + index, "id": item_id} for index, item_id in enumerate(sample_ids)]
+    _emit_and_remember(
+        app,
+        "select sample",
+        {
+            "status": "success",
+            "data": {
+                "name": name,
+                "count": len(sample_ids),
+                "offset": offset,
+                "resolve": resolve,
+                "rows": rows,
+            },
+        },
+    )
+
+
+@select_group.command("diff")
+@click.argument("left")
+@click.argument("right")
+@pass_app
+def select_diff(app: AppContext, left: str, right: str) -> None:
+    left_doc = _load_selection(left)
+    right_doc = _load_selection(right)
+    left_ids = [str(item_id) for item_id in left_doc.get("item_ids") or [] if str(item_id)]
+    right_ids = [str(item_id) for item_id in right_doc.get("item_ids") or [] if str(item_id)]
+    left_set = set(left_ids)
+    right_set = set(right_ids)
+    _emit_and_remember(
+        app,
+        "select diff",
+        {
+            "status": "success",
+            "data": {
+                "left": left,
+                "right": right,
+                "left_only": [item_id for item_id in left_ids if item_id not in right_set],
+                "right_only": [item_id for item_id in right_ids if item_id not in left_set],
+                "common": [item_id for item_id in left_ids if item_id in right_set],
+            },
+        },
+    )
+
+
+@cli.group()
+def report() -> None:
+    """Report generation commands."""
+
+
+@report.command("library")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html", "csv"]), default="auto", show_default=True)
+@pass_app
+def report_library(app: AppContext, output_file: Path, report_format: str) -> None:
+    info = _library_info_data(app)
+    rows = []
+    for index, entry in enumerate(info.get("quickAccess") or []):
+        if isinstance(entry, dict):
+            rows.append(
+                {
+                    "index": index,
+                    "id": entry.get("id", ""),
+                    "name": entry.get("name", ""),
+                    "type": entry.get("vstype") or entry.get("type", ""),
+                    "description": entry.get("description", ""),
+                }
+            )
+    document = {
+        "title": "CLI-Anything Eagle Library Report",
+        **build_library_summary(info),
+        "rows": rows,
+    }
+    resolved_format = _write_report(output_file, document, requested_format=report_format)
+    _emit_and_remember(
+        app,
+        "report library",
+        {
+            "status": "success",
+            "data": {
+                "saved_to": str(output_file),
+                "format": resolved_format,
+                "summary": {key: value for key, value in document.items() if key not in {"title", "rows"}},
+            },
+        },
+    )
+
+
+@report.command("tags")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html", "csv"]), default="auto", show_default=True)
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--top", type=click.IntRange(1, None), default=20, show_default=True)
+@item_filter_options
+@pass_app
+def report_tags(
+    app: AppContext,
+    output_file: Path,
+    report_format: str,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    top: int,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    query = _query_or_collect_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    stats = _build_tag_stats(query["items"], top=top)
+    audit = _build_tag_audit(query["items"], top=top)
+    document = {
+        "title": "CLI-Anything Eagle Tag Report",
+        **stats,
+        "audit": audit,
+        "query": query["query"],
+        "pages": query["pages"],
+    }
+    resolved_format = _write_report(output_file, document, requested_format=report_format)
+    _emit_and_remember(
+        app,
+        "report tags",
+        {
+            "status": "success",
+            "data": {
+                "saved_to": str(output_file),
+                "format": resolved_format,
+                "row_count": len(stats["rows"]),
+            },
+        },
+    )
+
+
+@report.command("folders")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html", "csv"]), default="auto", show_default=True)
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--top", type=click.IntRange(1, None), default=20, show_default=True)
+@item_filter_options
+@pass_app
+def report_folders(
+    app: AppContext,
+    output_file: Path,
+    report_format: str,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    top: int,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    from collections import Counter
+
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    query = _query_or_collect_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    folder_map = {record.id: record.path for record in _folder_records(app)}
+    counts: Counter[str] = Counter()
+    unfiled_items = 0
+    for item in query["items"]:
+        item_folders = [str(folder_id) for folder_id in item.get("folders") or [] if str(folder_id)]
+        if not item_folders:
+            counts["(unfiled)"] += 1
+            unfiled_items += 1
+            continue
+        for folder_id in item_folders:
+            counts[folder_map.get(folder_id, folder_id)] += 1
+    rows = [{"folder": folder, "count": count} for folder, count in counts.most_common(top)]
+    document = {
+        "title": "CLI-Anything Eagle Folder Report",
+        "total_items": len(query["items"]),
+        "unfiled_items": unfiled_items,
+        "unique_folder_count": len(counts),
+        "rows": rows,
+        "query": query["query"],
+        "pages": query["pages"],
+    }
+    resolved_format = _write_report(output_file, document, requested_format=report_format)
+    _emit_and_remember(
+        app,
+        "report folders",
+        {
+            "status": "success",
+            "data": {
+                "saved_to": str(output_file),
+                "format": resolved_format,
+                "row_count": len(rows),
+            },
+        },
+    )
+
+
+@report.command("trend")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html", "csv"]), default="auto", show_default=True)
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--bucket", type=click.Choice(["month", "year"]), default="month", show_default=True)
+@click.option("--field", type=click.Choice(["created", "modification"]), default="modification", show_default=True)
+@item_filter_options
+@pass_app
+def report_trend(
+    app: AppContext,
+    output_file: Path,
+    report_format: str,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    bucket: str,
+    field: str,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    query = _query_or_collect_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    rows = _trend_rows(query["items"], bucket=bucket, field=field)
+    document = {
+        "title": "CLI-Anything Eagle Trend Report",
+        "bucket": bucket,
+        "field": field,
+        "item_count": len(query["items"]),
+        "rows": rows,
+        "query": query["query"],
+        "pages": query["pages"],
+    }
+    resolved_format = _write_report(output_file, document, requested_format=report_format)
+    _emit_and_remember(
+        app,
+        "report trend",
+        {
+            "status": "success",
+            "data": {
+                "saved_to": str(output_file),
+                "format": resolved_format,
+                "row_count": len(rows),
+            },
+        },
+    )
+
+
+@cli.group()
+def workflow() -> None:
+    """Declarative workflow commands."""
+
+
+@workflow.command("validate")
+@click.argument("workflow_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@pass_app
+def workflow_validate(app: AppContext, workflow_file: Path) -> None:
+    payload = _load_workflow(workflow_file)
+    validation = _validate_workflow_document(payload)
+    _emit_and_remember(
+        app,
+        "workflow validate",
+        {
+            "status": "success",
+            "data": {
+                "workflow_file": str(workflow_file),
+                **validation,
+            },
+        },
+    )
+
+
+@workflow.command("run")
+@click.argument("workflow_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--save-plan", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write combined workflow mutations to a plan file.")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue bridge work without waiting for Eagle to process it.")
+@pass_app
+def workflow_run(app: AppContext, workflow_file: Path, save_plan: Path | None, bridge_timeout: float, queue_only: bool) -> None:
+    payload = _load_workflow(workflow_file)
+    validation = _validate_workflow_document(payload)
+    if not validation["valid"]:
+        raise click.ClickException("; ".join(validation["errors"]))
+    items, query = _workflow_items(app, payload)
+    aggregate_operations: list[dict[str, Any]] = []
+    step_results = []
+    for index, step in enumerate(payload.get("steps") or [], start=1):
+        action = step.get("action")
+        step_result: dict[str, Any] = {"index": index, "action": action}
+        if action == "snapshot":
+            output = Path(step["output"])
+            document = _snapshot_document(f"workflow:{workflow_file.name}:step-{index}", items, context={"workflow_file": str(workflow_file)})
+            if not app.dry_run:
+                _write_snapshot(output, document)
+            step_result.update({"output": str(output), "item_count": len(items)})
+        elif action == "export-items":
+            output = Path(step["output"])
+            export_format = str(step.get("format", "auto"))
+            if not app.dry_run:
+                resolved_format = _write_items_export(output, items, export_format)
+                step_result.update({"output": str(output), "format": resolved_format, "item_count": len(items)})
+            else:
+                step_result.update({"output": str(output), "format": export_format, "item_count": len(items)})
+        elif action == "report-tags":
+            output = Path(step["output"])
+            top = int(step.get("top", 20))
+            document = {
+                "title": "CLI-Anything Eagle Tag Report",
+                **_build_tag_stats(items, top=top),
+                "audit": _build_tag_audit(items, top=top),
+            }
+            if not app.dry_run:
+                step_result.update({"output": str(output), "format": _write_report(output, document, requested_format=str(step.get("format", "auto")))})
+            else:
+                step_result.update({"output": str(output), "format": str(step.get("format", "auto"))})
+        elif action == "report-folders":
+            output = Path(step["output"])
+            folder_map = {record.id: record.path for record in _folder_records(app)}
+            from collections import Counter
+
+            counts: Counter[str] = Counter()
+            for item in items:
+                item_folders = [str(folder_id) for folder_id in item.get("folders") or [] if str(folder_id)]
+                if not item_folders:
+                    counts["(unfiled)"] += 1
+                    continue
+                for folder_id in item_folders:
+                    counts[folder_map.get(folder_id, folder_id)] += 1
+            document = {
+                "title": "CLI-Anything Eagle Folder Report",
+                "rows": [{"folder": folder, "count": count} for folder, count in counts.most_common(int(step.get("top", 20)))],
+                "total_items": len(items),
+            }
+            if not app.dry_run:
+                step_result.update({"output": str(output), "format": _write_report(output, document, requested_format=str(step.get("format", "auto")))})
+            else:
+                step_result.update({"output": str(output), "format": str(step.get("format", "auto"))})
+        elif action == "report-trend":
+            output = Path(step["output"])
+            document = {
+                "title": "CLI-Anything Eagle Trend Report",
+                "bucket": step.get("bucket", "month"),
+                "field": step.get("field", "modification"),
+                "rows": _trend_rows(
+                    items,
+                    bucket=str(step.get("bucket", "month")),
+                    field=str(step.get("field", "modification")),
+                ),
+            }
+            if not app.dry_run:
+                step_result.update({"output": str(output), "format": _write_report(output, document, requested_format=str(step.get("format", "auto")))})
+            else:
+                step_result.update({"output": str(output), "format": str(step.get("format", "auto"))})
+        elif action == "bulk-update":
+            operations, skipped = _build_item_update_operations(
+                items,
+                set_tags=tuple(step.get("set_tags") or []),
+                add_tags=tuple(step.get("add_tags") or []),
+                annotation=step.get("annotation"),
+                source_url=step.get("source_url"),
+                star=step.get("star"),
+                skip_unchanged=bool(step.get("skip_unchanged")),
+            )
+            aggregate_operations.extend(operations)
+            if app.dry_run:
+                _simulate_http_operations(items, operations)
+                step_result.update({"operation_count": len(operations), "skipped": skipped})
+            else:
+                step_result.update({"operation_count": len(operations), "skipped": skipped, "results": _execute_operations(app, operations)})
+        elif action == "rename":
+            operations, skipped = _build_rename_operations(
+                items,
+                prefix=str(step.get("prefix", "")),
+                suffix=str(step.get("suffix", "")),
+                replace_from=step.get("replace_from"),
+                replace_to=str(step.get("replace_to", "")),
+                regex_from=step.get("regex_from"),
+                regex_to=step.get("regex_to"),
+                name_template=step.get("name_template"),
+                strip_names=bool(step.get("strip_names")),
+                skip_unchanged=bool(step.get("skip_unchanged")),
+            )
+            bridge_operations = (
+                [_make_bridge_operation("rename_items", {"operations": operations}, description=f"Workflow rename step {index}")]
+                if operations
+                else []
+            )
+            aggregate_operations.extend(bridge_operations)
+            if app.dry_run:
+                _simulate_rename_operations(items, operations)
+                step_result.update({"operation_count": len(operations), "skipped": skipped})
+            else:
+                step_result.update(
+                    {
+                        "operation_count": len(operations),
+                        "skipped": skipped,
+                        "results": _execute_operations(
+                            app,
+                            bridge_operations,
+                            bridge_timeout=bridge_timeout,
+                            queue_only=queue_only,
+                        ),
+                    }
+                )
+        elif action == "move":
+            ensure_result, folder = _resolve_move_target(
+                app,
+                target_folder_id=step.get("target_folder_id"),
+                target_folder_name=step.get("target_folder_name"),
+                target_folder_path=step.get("target_folder_path"),
+                ensure_target_path=step.get("ensure_target_path"),
+            )
+            operations, skipped = _build_move_operations(
+                items,
+                target_folder_id=folder.id if folder is not None else "",
+                target_folder_path=folder.path if folder is not None else "",
+                skip_unchanged=bool(step.get("skip_unchanged")),
+            )
+            bridge_operations = (
+                [_make_bridge_operation("move_items", {"operations": operations}, description=f"Workflow move step {index}")]
+                if operations
+                else []
+            )
+            aggregate_operations.extend(bridge_operations)
+            if app.dry_run:
+                _simulate_move_operations(items, operations)
+                step_result.update({"operation_count": len(operations), "skipped": skipped, "target_folder": _folder_row(folder), "ensure_result": ensure_result})
+            else:
+                step_result.update(
+                    {
+                        "operation_count": len(operations),
+                        "skipped": skipped,
+                        "target_folder": _folder_row(folder),
+                        "ensure_result": ensure_result,
+                        "results": _execute_operations(
+                            app,
+                            bridge_operations,
+                            bridge_timeout=bridge_timeout,
+                            queue_only=queue_only,
+                        ),
+                    }
+                )
+        else:
+            raise click.ClickException(f"Unsupported workflow step action: {action}")
+        step_results.append(step_result)
+    if save_plan is not None:
+        _save_plan_if_requested(
+            save_plan,
+            "workflow run",
+            aggregate_operations,
+            context={
+                "workflow_file": str(workflow_file),
+                "query": query["query"],
+                "pages": query["pages"],
+            },
+        )
+    _emit_and_remember(
+        app,
+        "workflow run",
+        {
+            "status": "dry-run" if app.dry_run else "success",
+            "data": {
+                "workflow_file": str(workflow_file),
+                "item_count": len(items),
+                "steps": step_results,
+                "saved_plan": str(save_plan) if save_plan is not None else None,
+            },
+        },
+    )
+
+
+@cli.group()
+def ingest() -> None:
+    """Manifest-driven import commands."""
+
+
+@ingest.command("manifest")
+@click.argument("manifest_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--folder-id", default=None)
+@click.option("--folder-name", default=None)
+@click.option("--folder-path", default=None)
+@pass_app
+def ingest_manifest(
+    app: AppContext,
+    manifest_file: Path,
+    folder_id: str | None,
+    folder_name: str | None,
+    folder_path: str | None,
+) -> None:
+    payload = _load_data_file(manifest_file)
+    if not isinstance(payload, dict):
+        raise click.ClickException("Manifest file must be a JSON or YAML object.")
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        raise click.ClickException("Manifest file must contain a non-empty 'items' array.")
+    target_folder = _resolve_folder_selector(
+        app,
+        folder_id=folder_id or payload.get("folder_id"),
+        folder_name=folder_name or payload.get("folder_name"),
+        folder_path=folder_path or payload.get("folder_path"),
+        purpose="target folder",
+        required=False,
+    )
+    request_payload: dict[str, Any] = {"items": items}
+    if target_folder is not None:
+        request_payload["folderId"] = target_folder.id
+    _run_mutation(
+        app,
+        "ingest manifest",
+        endpoint="/api/item/addFromPaths",
+        payload=request_payload,
+        action=lambda: app.client.item_add_from_paths(items, folder_id=target_folder.id if target_folder else None),
+        resolved={
+            "manifest_file": str(manifest_file),
+            "item_count": len(items),
+            "folder": _folder_row(target_folder) if target_folder is not None else None,
+        },
+    )
+
+
+@cli.group()
+def watch() -> None:
+    """Incremental import watch helpers."""
+
+
+@watch.command("import-dir")
+@click.argument("directory", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--recursive", is_flag=True, help="Walk subdirectories recursively.")
+@click.option("--glob", "globs", multiple=True, help="Repeatable glob filter. Defaults to '*'.")
+@click.option("--ext", "extensions", multiple=True, help="Repeatable file extension filter.")
+@click.option("--hidden", "include_hidden", is_flag=True, help="Include dotfiles and files inside hidden directories.")
+@click.option("--limit", type=click.IntRange(1, None), default=None)
+@click.option("--website", default=None)
+@click.option("--tag", "tags", multiple=True)
+@click.option("--annotation", default=None)
+@click.option("--name-template", default=None)
+@click.option("--tag-from-path", is_flag=True)
+@click.option("--tag-from-name", is_flag=True)
+@click.option("--folder-id", default=None)
+@click.option("--folder-name", default=None)
+@click.option("--folder-path", default=None)
+@click.option("--state-file", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Override the watch state file location.")
+@click.option("--save-manifest", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--reset-state", is_flag=True, help="Ignore the previous watch state and treat all files as new.")
+@pass_app
+def watch_import_dir(
+    app: AppContext,
+    directory: Path,
+    recursive: bool,
+    globs: tuple[str, ...],
+    extensions: tuple[str, ...],
+    include_hidden: bool,
+    limit: int | None,
+    website: str | None,
+    tags: tuple[str, ...],
+    annotation: str | None,
+    name_template: str | None,
+    tag_from_path: bool,
+    tag_from_name: bool,
+    folder_id: str | None,
+    folder_name: str | None,
+    folder_path: str | None,
+    state_file: Path | None,
+    save_manifest: Path | None,
+    reset_state: bool,
+) -> None:
+    target_folder = _resolve_folder_selector(
+        app,
+        folder_id=folder_id,
+        folder_name=folder_name,
+        folder_path=folder_path,
+        purpose="target folder",
+        required=False,
+    )
+    previous_state = {"version": 1, "files": {}} if reset_state else _load_watch_state(state_file)
+    files = _collect_files_from_directory(
+        directory,
+        recursive=recursive,
+        globs=globs,
+        extensions=extensions,
+        include_hidden=include_hidden,
+        limit=limit,
+    )
+    changed_files = []
+    next_files: dict[str, Any] = {}
+    for path in files:
+        signature = _file_signature(path)
+        next_files[str(path)] = signature
+        if previous_state.get("files", {}).get(str(path)) != signature:
+            changed_files.append(path)
+    items = _build_add_dir_items(
+        directory,
+        changed_files,
+        website=website,
+        tags=tags,
+        annotation=annotation,
+        name_template=name_template,
+        tag_from_path=tag_from_path,
+        tag_from_name=tag_from_name,
+    )
+    if save_manifest is not None:
+        _write_manifest(
+            save_manifest,
+            {
+                "kind": "eagle-cli-add-paths-manifest",
+                "version": 1,
+                "source_directory": str(directory),
+                "watch_state_file": str(_watch_state_path(state_file)),
+                "items": items,
+            },
+        )
+    request_payload: dict[str, Any] = {"items": items}
+    if target_folder is not None:
+        request_payload["folderId"] = target_folder.id
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "watch import-dir",
+            {
+                "status": "dry-run",
+                "data": {
+                    "directory": str(directory),
+                    "changed_count": len(changed_files),
+                    "changed_files": [str(path) for path in changed_files],
+                    "items": items,
+                    "state_file": str(_watch_state_path(state_file)),
+                    "saved_manifest": str(save_manifest) if save_manifest is not None else None,
+                },
+            },
+        )
+        return
+    response = app.client.item_add_from_paths(items, folder_id=target_folder.id if target_folder else None) if items else {"status": "success", "data": {"itemIds": []}}
+    written_state = _save_watch_state(state_file, {"version": 1, "files": next_files, "updated_at": _utc_now()})
+    _emit_and_remember(
+        app,
+        "watch import-dir",
+        {
+            "status": "success",
+            "data": {
+                "directory": str(directory),
+                "changed_count": len(changed_files),
+                "changed_files": [str(path) for path in changed_files],
+                "response": response,
+                "state_file": str(written_state),
+                "saved_manifest": str(save_manifest) if save_manifest is not None else None,
+            },
+        },
+    )
+
+
+@cli.group()
+def completion() -> None:
+    """Shell completion helpers."""
+
+
+@completion.command("script")
+@click.option("--shell", "shell_name", type=click.Choice(["bash", "zsh", "fish"]), default="zsh", show_default=True)
+@click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@pass_app
+def completion_script(app: AppContext, shell_name: str, output: Path | None) -> None:
+    script = _completion_script(shell_name)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(f"{script}\n", encoding="utf-8")
+    _emit_and_remember(
+        app,
+        "completion script",
+        {
+            "status": "success",
+            "data": {
+                "shell": shell_name,
+                "script": script,
+                "saved_to": str(output) if output is not None else None,
+            },
+        },
+    )
+
+
+@cli.group()
+def schema() -> None:
+    """Document schema helpers."""
+
+
+@schema.command("show")
+@click.argument("kind", type=click.Choice(["plan", "snapshot", "selection", "workflow", "report"]))
+@click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@pass_app
+def schema_show(app: AppContext, kind: str, output: Path | None) -> None:
+    document = _schema_document(kind)
+    if output is not None:
+        _write_manifest(output, document)
+    _emit_and_remember(
+        app,
+        "schema show",
+        {
+            "status": "success",
+            "data": {
+                "kind": kind,
+                "schema": document,
+                "saved_to": str(output) if output is not None else None,
             },
         },
     )
@@ -3583,20 +6604,38 @@ def _build_rename_operations(
     suffix: str,
     replace_from: str | None,
     replace_to: str | None,
+    regex_from: str | None,
+    regex_to: str | None,
+    name_template: str | None,
     strip_names: bool,
     skip_unchanged: bool,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    if not any([prefix, suffix, replace_from is not None, strip_names]):
-        raise click.ClickException("Provide at least one rename transform such as --prefix, --suffix, --replace-from, or --strip.")
+    if not any([prefix, suffix, replace_from is not None, regex_from, name_template, strip_names]):
+        raise click.ClickException(
+            "Provide at least one rename transform such as --prefix, --suffix, --replace-from, --regex-from, --name-template, or --strip."
+        )
     operations: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
-    for item in items:
+    for index, item in enumerate(items, start=1):
         current_name = str(item.get("name") or "")
         next_name = current_name
         if replace_from is not None:
             next_name = next_name.replace(replace_from, replace_to or "")
+        if regex_from:
+            next_name = re.sub(regex_from, regex_to or "", next_name)
         if strip_names:
             next_name = next_name.strip()
+        if name_template:
+            try:
+                next_name = name_template.format(
+                    name=next_name,
+                    original=current_name,
+                    ext=str(item.get("ext") or ""),
+                    id=str(item.get("id") or ""),
+                    index=index,
+                )
+            except KeyError as exc:
+                raise click.ClickException(f"Unsupported rename template field: {exc.args[0]}") from exc
         next_name = f"{prefix}{next_name}{suffix}"
         if not next_name:
             skipped.append({"id": item.get("id"), "name": current_name, "reason": "empty-result"})
@@ -4876,6 +7915,791 @@ def _chunked(items: list[str], size: int) -> list[list[str]]:
     if not items:
         return []
     return [items[index : index + size] for index in range(0, len(items), size)]
+
+
+def _build_item_update_operations(
+    items: list[dict[str, Any]],
+    *,
+    set_tags: tuple[str, ...] | list[str] = (),
+    add_tags: tuple[str, ...] | list[str] = (),
+    annotation: str | None = None,
+    source_url: str | None = None,
+    star: int | None = None,
+    skip_unchanged: bool,
+    tag_transform=None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    operations: list[dict[str, Any]] = []
+    skipped_unchanged: list[dict[str, Any]] = []
+    for item in items:
+        next_tags = None
+        if tag_transform is not None:
+            next_tags = list(tag_transform(item))
+        else:
+            next_tags = list(set_tags) if set_tags else None
+            if add_tags:
+                current_tags = list(item.get("tags") or [])
+                for tag in add_tags:
+                    if tag not in current_tags:
+                        current_tags.append(tag)
+                next_tags = current_tags
+
+        payload: dict[str, Any] = {"id": item["id"]}
+        if next_tags is not None:
+            payload["tags"] = next_tags
+        if annotation is not None:
+            payload["annotation"] = annotation
+        if source_url is not None:
+            payload["url"] = source_url
+        if star is not None:
+            payload["star"] = star
+
+        changed_fields = _changed_item_fields(item, payload)
+        if skip_unchanged and not changed_fields:
+            skipped_unchanged.append({"id": item.get("id"), "name": item.get("name")})
+            continue
+        operations.append(
+            {
+                "method": "POST",
+                "item": {
+                    "id": item.get("id"),
+                    "name": item.get("name"),
+                    "existing_tags": item.get("tags") or [],
+                },
+                "endpoint": "/api/item/update",
+                "payload": payload,
+                "changed_fields": changed_fields,
+                "description": f"Update item {item.get('id')} ({item.get('name')})",
+            }
+        )
+    return operations, skipped_unchanged
+
+
+def _execute_operations(
+    app: AppContext,
+    operations: list[dict[str, Any]],
+    *,
+    bridge_timeout: float = DEFAULT_WAIT_SECONDS,
+    queue_only: bool = False,
+) -> list[dict[str, Any]]:
+    results = []
+    for operation in operations:
+        if operation.get("kind") == "bridge":
+            response = _bridge_request(
+                operation["action"],
+                operation.get("payload") or {},
+                timeout_seconds=bridge_timeout,
+                queue_only=queue_only,
+            )
+            results.append(
+                {
+                    "kind": "bridge",
+                    "action": operation["action"],
+                    "status": response.get("status", "success"),
+                    "description": operation.get("description"),
+                }
+            )
+            continue
+        response = app.client.raw_request(
+            operation.get("method", "POST"),
+            operation["endpoint"],
+            payload=operation.get("payload"),
+        )
+        results.append(
+            {
+                "kind": "http",
+                "endpoint": operation["endpoint"],
+                "method": operation.get("method", "POST"),
+                "status": response.get("status", "success"),
+                "description": operation.get("description"),
+            }
+        )
+    return results
+
+
+def _safe_name(name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")
+    return cleaned or "selection"
+
+
+def _selection_dir() -> Path:
+    path = DEFAULT_STATE_DIR / "selections"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _selection_path(name: str) -> Path:
+    return _selection_dir() / f"{_safe_name(name)}.json"
+
+
+def _selection_document(name: str, item_ids: list[str], *, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "kind": "eagle-cli-selection",
+        "version": 1,
+        "name": name,
+        "created_at": _utc_now(),
+        "item_ids": item_ids,
+        "item_count": len(item_ids),
+        "sample_ids": item_ids[:10],
+        "context": context or {},
+    }
+
+
+def _save_selection(name: str, item_ids: list[str], *, context: dict[str, Any] | None = None) -> Path:
+    path = _selection_path(name)
+    _write_manifest(path, _selection_document(name, item_ids, context=context))
+    return path
+
+
+def _load_selection(name: str) -> dict[str, Any]:
+    path = _selection_path(name)
+    if not path.exists():
+        raise click.ClickException(f"Unknown selection: {name}")
+    return _load_data_file(path)
+
+
+def _list_selections() -> list[dict[str, Any]]:
+    selections = []
+    for path in sorted(_selection_dir().glob("*.json")):
+        payload = _load_data_file(path)
+        selections.append(
+            {
+                "name": payload.get("name") or path.stem,
+                "item_count": payload.get("item_count", len(payload.get("item_ids") or [])),
+                "created_at": payload.get("created_at"),
+                "path": str(path),
+            }
+        )
+    return selections
+
+
+def _delete_selection(name: str) -> bool:
+    path = _selection_path(name)
+    if not path.exists():
+        return False
+    path.unlink()
+    return True
+
+
+def _load_data_file(path: Path) -> Any:
+    suffix = path.suffix.casefold()
+    text = path.read_text(encoding="utf-8")
+    if suffix in {".yaml", ".yml"}:
+        return yaml.safe_load(text)
+    return json.loads(text)
+
+
+def _find_saved_snapshot_path(node: Any) -> str | None:
+    if isinstance(node, dict):
+        saved_snapshot = node.get("saved_snapshot")
+        if isinstance(saved_snapshot, str) and saved_snapshot:
+            return saved_snapshot
+        for value in node.values():
+            resolved = _find_saved_snapshot_path(value)
+            if resolved:
+                return resolved
+    elif isinstance(node, list):
+        for value in node:
+            resolved = _find_saved_snapshot_path(value)
+            if resolved:
+                return resolved
+    return None
+
+
+def _build_tag_stats(items: list[dict[str, Any]], *, top: int) -> dict[str, Any]:
+    from collections import Counter
+
+    tag_counts: Counter[str] = Counter()
+    tagged_items = 0
+    total_tags = 0
+    for item in items:
+        tags = [str(tag) for tag in item.get("tags") or [] if str(tag)]
+        if tags:
+            tagged_items += 1
+        total_tags += len(tags)
+        for tag in tags:
+            tag_counts[tag] += 1
+    return {
+        "total_items": len(items),
+        "tagged_items": tagged_items,
+        "untagged_items": len(items) - tagged_items,
+        "unique_tag_count": len(tag_counts),
+        "average_tags_per_item": round(total_tags / len(items), 3) if items else 0.0,
+        "rows": [{"tag": tag, "count": count} for tag, count in tag_counts.most_common(top)],
+    }
+
+
+def _build_folder_stats(app: AppContext, items: list[dict[str, Any]], *, top: int) -> dict[str, Any]:
+    from collections import Counter
+
+    folder_map = {record.id: record for record in _folder_records(app)}
+    counts: Counter[str] = Counter()
+    unfiled_items = 0
+    for item in items:
+        folder_ids = [str(folder_id) for folder_id in item.get("folders") or [] if str(folder_id)]
+        if not folder_ids:
+            unfiled_items += 1
+            continue
+        for folder_id in list(dict.fromkeys(folder_ids)):
+            counts[folder_id] += 1
+    rows = []
+    for folder_id, count in counts.most_common(top):
+        record = folder_map.get(folder_id)
+        rows.append(
+            {
+                "folder_id": folder_id,
+                "folder_name": record.name if record is not None else "",
+                "folder_path": record.path if record is not None else "",
+                "count": count,
+            }
+        )
+    return {
+        "total_items": len(items),
+        "unfiled_items": unfiled_items,
+        "unique_folder_count": len(counts),
+        "rows": rows,
+    }
+
+
+def _normalize_tag_value(
+    value: str,
+    *,
+    lowercase: bool,
+    trim: bool,
+    collapse_spaces: bool,
+) -> str:
+    normalized = value
+    if trim:
+        normalized = normalized.strip()
+    if collapse_spaces:
+        normalized = re.sub(r"\s+", " ", normalized)
+    if lowercase:
+        normalized = normalized.lower()
+    return normalized
+
+
+def _build_tag_audit(items: list[dict[str, Any]], *, top: int) -> dict[str, Any]:
+    from collections import Counter, defaultdict
+
+    variants: dict[str, set[str]] = defaultdict(set)
+    duplicate_items: list[dict[str, Any]] = []
+    whitespace_tags: Counter[str] = Counter()
+    for item in items:
+        tags = [str(tag) for tag in item.get("tags") or [] if str(tag)]
+        normalized_seen: list[str] = []
+        duplicate_values: list[str] = []
+        for tag in tags:
+            normalized = _normalize_tag_value(tag, lowercase=True, trim=True, collapse_spaces=True)
+            variants[normalized].add(tag)
+            if tag != tag.strip() or "  " in tag:
+                whitespace_tags[tag] += 1
+            if normalized in normalized_seen:
+                duplicate_values.append(tag)
+            else:
+                normalized_seen.append(normalized)
+        if duplicate_values:
+            duplicate_items.append({"id": item.get("id"), "name": item.get("name"), "duplicate_tags": duplicate_values})
+    collisions = [
+        {"normalized": normalized, "variants": sorted(values), "count": len(values)}
+        for normalized, values in variants.items()
+        if len(values) > 1
+    ]
+    collisions.sort(key=lambda row: (-row["count"], row["normalized"]))
+    whitespace_rows = [{"tag": tag, "count": count} for tag, count in whitespace_tags.most_common(top)]
+    return {
+        "total_items": len(items),
+        "normalized_collision_count": len(collisions),
+        "duplicate_item_count": len(duplicate_items),
+        "collisions": collisions[:top],
+        "whitespace_tags": whitespace_rows,
+        "duplicate_items": duplicate_items[:top],
+    }
+
+
+def _load_alias_map(path: Path) -> dict[str, str]:
+    payload = _load_data_file(path)
+    if not isinstance(payload, dict):
+        raise click.ClickException("Alias map must be a JSON or YAML object.")
+    return {str(key): str(value) for key, value in payload.items()}
+
+
+def _parse_rename_pairs(values: tuple[str, ...]) -> dict[str, str]:
+    pairs: dict[str, str] = {}
+    for value in values:
+        if "=" not in value:
+            raise click.ClickException(f"Rename pair must look like old=new: {value}")
+        old, new = value.split("=", 1)
+        pairs[str(old)] = str(new)
+    return pairs
+
+
+def _tag_transform_from_alias_map(alias_map: dict[str, str], *, lowercase: bool, trim: bool, collapse_spaces: bool):
+    def transform(item: dict[str, Any]) -> list[str]:
+        next_tags: list[str] = []
+        for raw_tag in item.get("tags") or []:
+            tag = _normalize_tag_value(str(raw_tag), lowercase=lowercase, trim=trim, collapse_spaces=collapse_spaces)
+            if tag in alias_map:
+                tag = alias_map[tag]
+            if tag and tag not in next_tags:
+                next_tags.append(tag)
+        return next_tags
+
+    return transform
+
+
+def _build_cleanup_plan_operations(
+    items: list[dict[str, Any]],
+    *,
+    kinds: tuple[str, ...],
+    action: str,
+    review_tag: str | None,
+    target_folder_id: str | None,
+    target_folder_path: str | None,
+    batch_size: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    selected = []
+    for item in items:
+        reasons = []
+        if "untagged" in kinds and not list(item.get("tags") or []):
+            reasons.append("untagged")
+        if "unfiled" in kinds and not list(item.get("folders") or []):
+            reasons.append("unfiled")
+        if "missing-url" in kinds and not str(item.get("url") or "").strip():
+            reasons.append("missing-url")
+        if "missing-annotation" in kinds and not str(item.get("annotation") or "").strip():
+            reasons.append("missing-annotation")
+        if "deleted" in kinds and bool(item.get("isDeleted")):
+            reasons.append("deleted")
+        if reasons:
+            selected.append({"item": item, "reasons": reasons})
+
+    operations: list[dict[str, Any]] = []
+    if action == "add-tag":
+        tag_value = review_tag or "needs-review"
+        target_items = [row["item"] for row in selected]
+        operations, _ = _build_item_update_operations(target_items, add_tags=[tag_value], skip_unchanged=True)
+    elif action == "trash":
+        item_ids = [str(row["item"].get("id")) for row in selected if str(row["item"].get("id"))]
+        operations = [
+            _make_operation(
+                "POST",
+                "/api/item/moveToTrash",
+                {"itemIds": batch},
+                description=f"Move {len(batch)} cleanup item(s) to trash",
+            )
+            for batch in _chunked(item_ids, batch_size)
+        ]
+    elif action == "move-folder":
+        if not target_folder_id or not target_folder_path:
+            raise click.ClickException("Cleanup move-folder actions require a resolved target folder.")
+        move_operations, _ = _build_move_operations(
+            [row["item"] for row in selected],
+            target_folder_id=target_folder_id,
+            target_folder_path=target_folder_path,
+            skip_unchanged=True,
+        )
+        if move_operations:
+            operations.append(_make_bridge_operation("move_items", {"operations": move_operations}, description="Move cleanup items"))
+    else:
+        raise click.ClickException(f"Unsupported cleanup action: {action}")
+
+    return operations, {
+        "selected_count": len(selected),
+        "sample": [{"item": _minimal_item_row(row["item"]), "reasons": row["reasons"]} for row in selected[:10]],
+    }
+
+
+def _infer_report_format(path: Path, requested_format: str) -> str:
+    if requested_format != "auto":
+        return requested_format
+    suffix = path.suffix.casefold()
+    if suffix == ".md":
+        return "md"
+    if suffix == ".html":
+        return "html"
+    if suffix == ".csv":
+        return "csv"
+    return "json"
+
+
+def _write_report(path: Path, document: dict[str, Any], *, requested_format: str, rows_key: str | None = None) -> str:
+    report_format = _infer_report_format(path, requested_format)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if report_format == "json":
+        path.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        return report_format
+    if report_format == "md":
+        path.write_text(_markdown_report(document, rows_key=rows_key), encoding="utf-8")
+        return report_format
+    if report_format == "html":
+        path.write_text(_html_report(document, rows_key=rows_key), encoding="utf-8")
+        return report_format
+    if report_format == "csv":
+        rows = list(document.get(rows_key or "rows") or [])
+        if not isinstance(rows, list):
+            raise click.ClickException("CSV report output requires a row-based report document.")
+        columns = _collect_export_columns([row for row in rows if isinstance(row, dict)])
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=columns)
+            if columns:
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({column: _csv_cell(row.get(column)) for column in columns})
+        return report_format
+    raise click.ClickException(f"Unsupported report format: {report_format}")
+
+
+def _markdown_report(document: dict[str, Any], *, rows_key: str | None = None) -> str:
+    lines = [f"# {document.get('title', 'CLI-Anything Eagle Report')}", ""]
+    for key, value in document.items():
+        if key in {"rows", rows_key, "title"}:
+            continue
+        if isinstance(value, (dict, list)):
+            lines.append(f"## {key}")
+            lines.append("")
+            lines.append("```json")
+            lines.append(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+            lines.append("```")
+            lines.append("")
+        else:
+            lines.append(f"- **{key}**: {value}")
+    rows = list(document.get(rows_key or "rows") or [])
+    if rows:
+        columns = _collect_export_columns([row for row in rows if isinstance(row, dict)])
+        lines.extend(["", "## rows", ""])
+        lines.append("| " + " | ".join(columns) + " |")
+        lines.append("| " + " | ".join(["---"] * len(columns)) + " |")
+        for row in rows:
+            lines.append("| " + " | ".join(_csv_cell(row.get(column)) for column in columns) + " |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _html_report(document: dict[str, Any], *, rows_key: str | None = None) -> str:
+    import html
+
+    title = html.escape(str(document.get("title", "CLI-Anything Eagle Report")))
+    parts = [f"<html><head><meta charset='utf-8'><title>{title}</title></head><body>", f"<h1>{title}</h1>"]
+    for key, value in document.items():
+        if key in {"rows", rows_key, "title"}:
+            continue
+        parts.append(f"<h2>{html.escape(str(key))}</h2>")
+        if isinstance(value, (dict, list)):
+            parts.append(f"<pre>{html.escape(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))}</pre>")
+        else:
+            parts.append(f"<p>{html.escape(str(value))}</p>")
+    rows = list(document.get(rows_key or "rows") or [])
+    if rows:
+        columns = _collect_export_columns([row for row in rows if isinstance(row, dict)])
+        parts.append("<table border='1' cellspacing='0' cellpadding='4'><thead><tr>")
+        for column in columns:
+            parts.append(f"<th>{html.escape(column)}</th>")
+        parts.append("</tr></thead><tbody>")
+        for row in rows:
+            parts.append("<tr>")
+            for column in columns:
+                parts.append(f"<td>{html.escape(_csv_cell(row.get(column)))}</td>")
+            parts.append("</tr>")
+        parts.append("</tbody></table>")
+    parts.append("</body></html>")
+    return "".join(parts)
+
+
+def _trend_rows(items: list[dict[str, Any]], *, bucket: str, field: str) -> list[dict[str, Any]]:
+    from collections import Counter
+    from datetime import datetime, timezone
+
+    key_map = {"modification": ["modificationTime", "mtime", "lastModified"], "created": ["btime", "mtime"]}
+    buckets: Counter[str] = Counter()
+    for item in items:
+        timestamp = 0
+        for key in key_map[field]:
+            value = item.get(key)
+            if value not in (None, ""):
+                try:
+                    timestamp = int(value)
+                    break
+                except (TypeError, ValueError):
+                    continue
+        if not timestamp:
+            continue
+        dt = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
+        if bucket == "year":
+            label = f"{dt.year:04d}"
+        else:
+            label = f"{dt.year:04d}-{dt.month:02d}"
+        buckets[label] += 1
+    return [{"bucket": key, "count": buckets[key]} for key in sorted(buckets.keys())]
+
+
+def _load_workflow(path: Path) -> dict[str, Any]:
+    payload = _load_data_file(path)
+    if not isinstance(payload, dict):
+        raise click.ClickException("Workflow file must be a JSON or YAML object.")
+    return payload
+
+
+def _validate_workflow_document(payload: dict[str, Any]) -> dict[str, Any]:
+    errors: list[str] = []
+    if payload.get("kind") not in (None, "eagle-cli-workflow"):
+        errors.append("kind must be 'eagle-cli-workflow' when provided")
+    if not isinstance(payload.get("steps"), list) or not payload.get("steps"):
+        errors.append("workflow must contain a non-empty 'steps' list")
+    supported_actions = {
+        "snapshot",
+        "export-items",
+        "report-tags",
+        "report-folders",
+        "report-trend",
+        "bulk-update",
+        "rename",
+        "move",
+    }
+    for index, step in enumerate(payload.get("steps") or []):
+        if not isinstance(step, dict):
+            errors.append(f"step {index} must be an object")
+            continue
+        action = step.get("action")
+        if action not in supported_actions:
+            errors.append(f"step {index} has unsupported action: {action}")
+    return {"valid": not errors, "errors": errors}
+
+
+def _workflow_selector(payload: dict[str, Any]) -> dict[str, Any]:
+    selector = dict(payload.get("selection") or {})
+    item_ids = tuple(str(item_id) for item_id in selector.get("item_ids") or [] if str(item_id))
+    return {
+        "item_ids": item_ids,
+        "item_file": Path(selector["item_file"]) if selector.get("item_file") else None,
+        "use_last": bool(selector.get("last")),
+        "fetch_all": bool(selector.get("fetch_all")),
+        "limit": int(selector.get("limit", 20)),
+        "offset": int(selector.get("offset", 0)),
+        "order_by": selector.get("order_by"),
+        "keyword": selector.get("keyword"),
+        "ext": selector.get("ext"),
+        "tags": tuple(selector.get("tags") or []),
+        "folders": tuple(selector.get("folders") or []),
+        "folder_names": tuple(selector.get("folder_names") or []),
+        "folder_paths": tuple(selector.get("folder_paths") or []),
+    }
+
+
+def _workflow_items(app: AppContext, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    selector = _workflow_selector(payload)
+    _validate_item_selector_request(
+        item_ids=selector["item_ids"],
+        item_file=selector["item_file"],
+        use_last=selector["use_last"],
+        fetch_all=selector["fetch_all"],
+        keyword=selector["keyword"],
+        ext=selector["ext"],
+        tags=selector["tags"],
+        folders=selector["folders"],
+        folder_names=selector["folder_names"],
+        folder_paths=selector["folder_paths"],
+    )
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=selector["item_ids"],
+        item_file=selector["item_file"],
+        use_last=selector["use_last"],
+    )
+    query = _query_or_collect_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=selector["fetch_all"],
+        limit=selector["limit"],
+        offset=selector["offset"],
+        order_by=selector["order_by"],
+        keyword=selector["keyword"],
+        ext=selector["ext"],
+        tags=selector["tags"],
+        folders=selector["folders"],
+        folder_names=selector["folder_names"],
+        folder_paths=selector["folder_paths"],
+    )
+    return [json.loads(json.dumps(item)) for item in query["items"]], query
+
+
+def _simulate_http_operations(items: list[dict[str, Any]], operations: list[dict[str, Any]]) -> None:
+    by_id = {str(item.get("id")): item for item in items}
+    for operation in operations:
+        payload = operation.get("payload") or {}
+        item_id = str(payload.get("id") or "")
+        if item_id and item_id in by_id:
+            item = by_id[item_id]
+            for key in ["tags", "annotation", "url", "star"]:
+                if key in payload:
+                    item[key] = payload[key]
+
+
+def _simulate_rename_operations(items: list[dict[str, Any]], operations: list[dict[str, Any]]) -> None:
+    by_id = {str(item.get("id")): item for item in items}
+    for operation in operations:
+        item_id = str(operation.get("item_id") or "")
+        if item_id in by_id:
+            by_id[item_id]["name"] = operation.get("new_name")
+
+
+def _simulate_move_operations(items: list[dict[str, Any]], operations: list[dict[str, Any]]) -> None:
+    by_id = {str(item.get("id")): item for item in items}
+    for operation in operations:
+        item_id = str(operation.get("item_id") or "")
+        if item_id in by_id:
+            by_id[item_id]["folders"] = list(operation.get("folder_ids") or [])
+
+
+def _file_signature(path: Path) -> dict[str, Any]:
+    stat = path.stat()
+    return {"path": str(path), "mtime_ns": stat.st_mtime_ns, "size": stat.st_size}
+
+
+def _watch_state_path(path: Path | None) -> Path:
+    if path is not None:
+        return path
+    target = DEFAULT_STATE_DIR / "watch-import-dir.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _load_watch_state(path: Path | None) -> dict[str, Any]:
+    state_path = _watch_state_path(path)
+    if not state_path.exists():
+        return {"version": 1, "files": {}}
+    return json.loads(state_path.read_text(encoding="utf-8"))
+
+
+def _save_watch_state(path: Path | None, payload: dict[str, Any]) -> Path:
+    state_path = _watch_state_path(path)
+    state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    return state_path
+
+
+def _tokenize_name_tags(stem: str) -> list[str]:
+    return [token for token in re.split(r"[^A-Za-z0-9가-힣]+", stem) if len(token) >= 2]
+
+
+def _render_import_name_template(path: Path, root: Path, template: str, index: int) -> str:
+    relative = path.relative_to(root)
+    return template.format(
+        name=path.stem,
+        stem=path.stem,
+        ext=path.suffix.lstrip("."),
+        parent=path.parent.name,
+        relative=str(relative),
+        relative_stem=str(relative.with_suffix("")),
+        index=index,
+    )
+
+
+def _build_add_dir_items(
+    directory: Path,
+    files: list[Path],
+    *,
+    website: str | None,
+    tags: tuple[str, ...],
+    annotation: str | None,
+    name_template: str | None,
+    tag_from_path: bool,
+    tag_from_name: bool,
+) -> list[dict[str, Any]]:
+    items = []
+    for index, path in enumerate(files, start=1):
+        item_tags = list(tags)
+        if tag_from_path:
+            relative_parent = path.relative_to(directory).parent
+            if str(relative_parent) != ".":
+                for part in relative_parent.parts:
+                    if part not in item_tags:
+                        item_tags.append(part)
+        if tag_from_name:
+            for token in _tokenize_name_tags(path.stem):
+                if token not in item_tags:
+                    item_tags.append(token)
+        item_name = _render_import_name_template(path, directory, name_template, index) if name_template else path.stem
+        items.append(
+            {
+                "path": str(path),
+                "name": item_name,
+                **({"website": website} if website else {}),
+                **({"tags": item_tags} if item_tags else {}),
+                **({"annotation": annotation} if annotation else {}),
+            }
+        )
+    return items
+
+
+def _completion_script(shell: str) -> str:
+    env_name = "_CLI_ANYTHING_EAGLE_COMPLETE"
+    if shell == "bash":
+        return f'eval "$({env_name}=bash_source cli-anything-eagle)"'
+    if shell == "zsh":
+        return f'eval "$({env_name}=zsh_source cli-anything-eagle)"'
+    if shell == "fish":
+        return f"{env_name}=fish_source cli-anything-eagle | source"
+    raise click.ClickException(f"Unsupported shell: {shell}")
+
+
+def _schema_document(kind: str) -> dict[str, Any]:
+    schemas = {
+        "plan": {
+            "title": "CLI-Anything Eagle Plan",
+            "type": "object",
+            "required": ["kind", "version", "operations"],
+            "properties": {
+                "kind": {"const": "eagle-cli-plan"},
+                "version": {"type": "integer"},
+                "command": {"type": "string"},
+                "context": {"type": "object"},
+                "operations": {"type": "array"},
+            },
+        },
+        "snapshot": {
+            "title": "CLI-Anything Eagle Snapshot",
+            "type": "object",
+            "required": ["kind", "version", "items"],
+            "properties": {
+                "kind": {"const": "eagle-cli-snapshot"},
+                "version": {"type": "integer"},
+                "created_at": {"type": "string"},
+                "items": {"type": "array"},
+            },
+        },
+        "selection": {
+            "title": "CLI-Anything Eagle Selection",
+            "type": "object",
+            "required": ["kind", "version", "name", "item_ids"],
+            "properties": {
+                "kind": {"const": "eagle-cli-selection"},
+                "version": {"type": "integer"},
+                "name": {"type": "string"},
+                "item_ids": {"type": "array"},
+            },
+        },
+        "workflow": {
+            "title": "CLI-Anything Eagle Workflow",
+            "type": "object",
+            "required": ["steps"],
+            "properties": {
+                "kind": {"const": "eagle-cli-workflow"},
+                "version": {"type": "integer"},
+                "selection": {"type": "object"},
+                "steps": {"type": "array"},
+            },
+        },
+        "report": {
+            "title": "CLI-Anything Eagle Report",
+            "type": "object",
+            "required": ["title"],
+            "properties": {
+                "title": {"type": "string"},
+                "rows": {"type": "array"},
+            },
+        },
+    }
+    if kind not in schemas:
+        raise click.ClickException(f"Unsupported schema kind: {kind}")
+    return schemas[kind]
 
 
 @cli.result_callback()

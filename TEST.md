@@ -13,6 +13,8 @@
 - Validate item stats summaries and bulk-update safety rails.
 - Validate rollback snapshots, duplicate audits, bridge plugin export, and
   higher-level organize planning.
+- Validate sequential `--last` reuse, `--item-file` selectors, snapshot diffs,
+  bridge-aware plan replay, and duplicate trash plan generation.
 - Run a small live smoke check separately against read-only endpoints only.
 
 ## Commands
@@ -35,10 +37,17 @@ python3 -m cli_anything.eagle.eagle_cli --json preset import ./presets.json --pr
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run item bulk-update --keyword ui --add-tag reviewed --max-items 10 --save-matches ./matches.json
 python3 -m cli_anything.eagle.eagle_cli --json snapshot create ./snapshot.json --item-id EXAMPLE
 python3 -m cli_anything.eagle.eagle_cli --json snapshot show ./snapshot.json
+python3 -m cli_anything.eagle.eagle_cli --json snapshot diff ./snapshot.json --include-names --include-folders
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run snapshot restore ./snapshot.json
 python3 -m cli_anything.eagle.eagle_cli --json audit duplicates --all --top 5
 python3 -m cli_anything.eagle.eagle_cli --json audit cleanup --all --sample-limit 5
+python3 -m cli_anything.eagle.eagle_cli --json audit dedupe-plan ./dedupe.json --keyword ui --mode name-size --keep largest
+python3 -m cli_anything.eagle.eagle_cli --json plan stats ./dedupe.json
 python3 -m cli_anything.eagle.eagle_cli --json bridge export-plugin ./bridge-plugin
+python3 -m cli_anything.eagle.eagle_cli --json item list --limit 2 --keyword CleanShot
+python3 -m cli_anything.eagle.eagle_cli --json --dry-run item bulk-update --last --add-tag reviewed
+python3 -m cli_anything.eagle.eagle_cli --json --dry-run item bulk-update --item-file ./items.json --add-tag reviewed
+python3 -m cli_anything.eagle.eagle_cli --json --dry-run item rename-bulk --item-id EXAMPLE --prefix archived- --save-plan ./rename.json
 python3 -m cli_anything.eagle.eagle_cli item rename-bulk --help
 python3 -m cli_anything.eagle.eagle_cli item move-bulk --help
 python3 -m cli_anything.eagle.eagle_cli organize apply --help
@@ -49,7 +58,7 @@ python3 -m cli_anything.eagle.eagle_cli plan --help
 
 ## Result
 
-- `python3 -m unittest discover -s tests -v` passed with 42 tests.
+- `python3 -m unittest discover -s tests -v` passed with 46 tests.
 - Live smoke checks passed for:
   - `cli-anything-eagle --json doctor`
   - `cli-anything-eagle --json app info`
@@ -61,14 +70,21 @@ python3 -m cli_anything.eagle.eagle_cli plan --help
   - `cli-anything-eagle --json item list --limit 2`
   - `cli-anything-eagle --json snapshot create <tmp>/snapshot.json --item-id <id>`
   - `cli-anything-eagle --json snapshot show <tmp>/snapshot.json`
+  - `cli-anything-eagle --json snapshot diff <tmp>/snapshot.json --include-names --include-folders`
   - `cli-anything-eagle --json --dry-run snapshot restore <tmp>/snapshot.json`
   - `cli-anything-eagle --json --dry-run item add-dir <tmp> --recursive --ext png`
+  - `cli-anything-eagle --json item list --limit 2 --keyword CleanShot`
+  - `cli-anything-eagle --json --dry-run item bulk-update --last --add-tag reviewed`
+  - `cli-anything-eagle --json --dry-run item bulk-update --item-file <tmp>/items.json --add-tag reviewed`
   - `cli-anything-eagle --json --dry-run item rename-bulk --item-id <id> --prefix archived-`
+  - `cli-anything-eagle --json plan stats <tmp>/rename-plan.json`
   - `cli-anything-eagle --json --dry-run item move-bulk --item-id <id> --target-folder-path <path>`
   - `cli-anything-eagle --json item export <tmp>/items.jsonl --all --limit 2 --keyword ui`
   - `cli-anything-eagle --json item stats --all --limit 2 --keyword ui`
   - `cli-anything-eagle --json audit duplicates --all --top 5`
   - `cli-anything-eagle --json audit cleanup --all --sample-limit 5`
+  - `cli-anything-eagle --json audit dedupe-plan <tmp>/dedupe.json --keyword CleanShot --mode name --keep largest`
+  - `cli-anything-eagle --json plan stats <tmp>/dedupe.json`
   - `cli-anything-eagle --json preset export <tmp>/presets.json`
   - `cli-anything-eagle --json preset import <tmp>/presets.json --prefix imported-`
   - `cli-anything-eagle --json --dry-run item bulk-update --keyword ui --add-tag reviewed --max-items 10 --save-matches <tmp>/matches.json`

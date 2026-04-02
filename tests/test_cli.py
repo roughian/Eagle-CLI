@@ -160,6 +160,40 @@ class EagleCliTests(unittest.TestCase):
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
     @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    def test_snapshot_diff_reports_metadata_changes(self, mock_item_info, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_info.return_value = {
+            "status": "success",
+            "data": {"id": "abc", "name": "Current", "tags": [], "annotation": "changed", "url": "", "folders": ["f1"]},
+        }
+        with self.runner.isolated_filesystem():
+            with open("snap.json", "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "kind": "eagle-cli-snapshot",
+                        "version": 1,
+                        "items": [{"id": "abc", "name": "Saved", "tags": ["ui"], "annotation": "", "url": "", "folders": ["f2"]}],
+                    },
+                    handle,
+                )
+            result = self.runner.invoke(
+                cli,
+                ["--json", "snapshot", "diff", "snap.json", "--include-names", "--include-folders"],
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["counts"]["changed_items"], 1)
+        fields = [row["field"] for row in payload["data"]["changed"][0]["differences"]]
+        self.assertIn("tags", fields)
+        self.assertIn("annotation", fields)
+        self.assertIn("name", fields)
+        self.assertIn("folders", fields)
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
     def test_snapshot_restore_dry_run_includes_bridge_ops(self, mock_item_info, mock_load, _mock_save):
         from cli_anything.eagle.core.state import SessionState
 
@@ -234,6 +268,29 @@ class EagleCliTests(unittest.TestCase):
         self.assertEqual(payload["status"], "dry-run")
         self.assertEqual(payload["data"]["matched_count"], 1)
         self.assertEqual(payload["data"]["operations"][0]["payload"]["tags"], ["old", "new"])
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    def test_item_bulk_update_loads_item_ids_from_file(self, mock_item_info, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_info.side_effect = [
+            {"status": "success", "data": {"id": "abc", "name": "A", "tags": []}},
+            {"status": "success", "data": {"id": "def", "name": "B", "tags": []}},
+        ]
+        with self.runner.isolated_filesystem():
+            with open("items.json", "w", encoding="utf-8") as handle:
+                json.dump([{"id": "abc", "name": "A"}, {"id": "def", "name": "B"}], handle)
+            result = self.runner.invoke(
+                cli,
+                ["--json", "--dry-run", "item", "bulk-update", "--item-file", "items.json", "--add-tag", "reviewed"],
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["matched_count"], 2)
+        self.assertEqual(mock_item_info.call_count, 2)
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
@@ -349,6 +406,33 @@ class EagleCliTests(unittest.TestCase):
         self.assertEqual(payload["data"]["counts"]["unfiled"], 1)
         self.assertEqual(payload["data"]["counts"]["missing_url"], 1)
         self.assertEqual(payload["data"]["counts"]["missing_annotation"], 1)
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
+    def test_audit_dedupe_plan_writes_move_to_trash_plan(self, mock_item_list, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_list.return_value = {
+            "status": "success",
+            "data": [
+                {"id": "a", "name": "Same", "size": 10},
+                {"id": "b", "name": "Same", "size": 20},
+                {"id": "c", "name": "Other", "size": 5},
+            ],
+        }
+        with self.runner.isolated_filesystem():
+            result = self.runner.invoke(
+                cli,
+                ["--json", "audit", "dedupe-plan", "dedupe.json", "--keyword", "same", "--mode", "name", "--keep", "largest"],
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+            with open("dedupe.json", "r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+        self.assertEqual(saved["kind"], "eagle-cli-plan")
+        self.assertEqual(saved["operations"][0]["endpoint"], "/api/item/moveToTrash")
+        self.assertEqual(saved["operations"][0]["payload"]["itemIds"], ["a"])
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
@@ -799,6 +883,34 @@ class EagleCliTests(unittest.TestCase):
             result = self.runner.invoke(cli, ["--json", "plan", "apply", "plan.json"])
             self.assertEqual(result.exit_code, 0, result.output)
             mock_raw_request.assert_called_once_with("POST", "/api/item/update", payload={"id": "abc"})
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_plan_apply_executes_bridge_operations(self, mock_bridge_request, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {"status": "success"}
+        with self.runner.isolated_filesystem():
+            with open("plan.json", "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "kind": "eagle-cli-plan",
+                        "version": 1,
+                        "operations": [
+                            {
+                                "kind": "bridge",
+                                "action": "rename_items",
+                                "payload": {"operations": [{"item_id": "abc", "new_name": "new"}]},
+                            }
+                        ],
+                    },
+                    handle,
+                )
+            result = self.runner.invoke(cli, ["--json", "plan", "apply", "plan.json"])
+            self.assertEqual(result.exit_code, 0, result.output)
+        mock_bridge_request.assert_called_once()
 
 
 if __name__ == "__main__":

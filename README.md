@@ -4,9 +4,10 @@
 app. It targets Eagle's local HTTP API and exposes practical commands for app
 info, library management, folder workflows, smart-folder rule inspection, item
 ingestion, bulk edits, reusable presets, preset bundles, item export,
-operation plans, query stats, rollback snapshots, duplicate and cleanup audits,
-high-level organize flows, and a companion bridge plugin for name and folder
-operations that are not available through the local HTTP API alone.
+operation plans, query stats, rollback snapshots, snapshot diffs, duplicate and
+cleanup audits, duplicate cleanup plan generation, high-level organize flows,
+and a companion bridge plugin for name and folder operations that are not
+available through the local HTTP API alone.
 
 ## Requirements
 
@@ -55,6 +56,8 @@ cli-anything-eagle folder tree
 cli-anything-eagle folder find Reference
 cli-anything-eagle --json item list --limit 10 --tag reference
 cli-anything-eagle --json audit duplicates --all --top 5
+cli-anything-eagle --json audit dedupe-plan ./plans/duplicates.json --keyword logo
+cli-anything-eagle --json plan stats ./plans/duplicates.json
 cli-anything-eagle --json bridge status
 ```
 
@@ -186,11 +189,22 @@ cli-anything-eagle --dry-run item bulk-update \
   --skip-unchanged
 ```
 
+Reuse the last item-producing command or load item IDs from a file:
+
+```bash
+cli-anything-eagle --json item list --limit 20 --keyword CleanShot
+cli-anything-eagle --dry-run item bulk-update --last --add-tag reviewed
+
+cli-anything-eagle item export ./exports/cleanshot.json --limit 20 --keyword CleanShot
+cli-anything-eagle --dry-run item bulk-update --item-file ./exports/cleanshot.json --add-tag reviewed
+```
+
 Create rollback snapshots before bigger changes:
 
 ```bash
 cli-anything-eagle snapshot create ./snapshots/ui.json --folder-path "Design/UI/References"
 cli-anything-eagle snapshot show ./snapshots/ui.json
+cli-anything-eagle snapshot diff ./snapshots/ui.json --include-names --include-folders
 cli-anything-eagle --dry-run snapshot restore ./snapshots/ui.json
 ```
 
@@ -208,6 +222,8 @@ Audit duplicate candidates and cleanup hotspots:
 ```bash
 cli-anything-eagle --json audit duplicates --all --mode name --mode url --top 20
 cli-anything-eagle --json audit cleanup --all --sample-limit 10
+cli-anything-eagle --json audit dedupe-plan ./plans/duplicate-trash.json --keyword ui --mode name-size --keep largest
+cli-anything-eagle --json plan stats ./plans/duplicate-trash.json
 ```
 
 Run a higher-level organize workflow in one command:
@@ -218,6 +234,7 @@ cli-anything-eagle --dry-run organize apply \
   --add-tag reviewed \
   --name-prefix ui- \
   --ensure-target-path "Archive/UI Reviewed" \
+  --max-items 100 \
   --save-snapshot ./snapshots/ui-reviewed.json
 ```
 
@@ -230,7 +247,20 @@ cli-anything-eagle --dry-run item bulk-update \
   --save-plan ./plans/reviewed.json
 
 cli-anything-eagle plan show ./plans/reviewed.json
+cli-anything-eagle plan stats ./plans/reviewed.json
 cli-anything-eagle plan apply ./plans/reviewed.json
+```
+
+Bridge-backed plans work too:
+
+```bash
+cli-anything-eagle --dry-run item rename-bulk \
+  --item-file ./exports/cleanshot.json \
+  --prefix archived- \
+  --save-plan ./plans/rename.json
+
+cli-anything-eagle plan stats ./plans/rename.json
+cli-anything-eagle plan apply ./plans/rename.json
 ```
 
 ## Covered Commands
@@ -245,11 +275,11 @@ cli-anything-eagle plan apply ./plans/reviewed.json
 - `item add-path`, `add-paths`, `add-dir`, `add-url`, `add-urls`, `add-bookmark`
 - `item trash`, `refresh-palette`, `refresh-thumbnail`
 - `preset list`, `show`, `delete`, `export`, `import`, `save-item-list`, `run-item-list`, `save-bulk-update`, `run-bulk-update`
-- `snapshot create`, `show`, `restore`
-- `audit duplicates`, `cleanup`
+- `snapshot create`, `show`, `diff`, `restore`
+- `audit duplicates`, `cleanup`, `dedupe-plan`
 - `organize apply`
 - `bridge status`, `export-plugin`, `install-plugin`, `ping`
-- `plan show`, `save-last`, `apply`
+- `plan show`, `stats`, `save-last`, `apply`
 - `raw request`
 
 ## Notes
@@ -261,13 +291,21 @@ cli-anything-eagle plan apply ./plans/reviewed.json
   API that actually responded on the tested Eagle build.
 - The CLI stores session state and presets in `~/.config/cli-anything-eagle`.
   Existing `~/.config/eagle-agent-harness` state is read as a legacy fallback.
+- `--last` reuses item IDs from the immediately previous item-producing command
+  recorded in session state. It is best used in sequential workflows rather
+  than parallel command runs.
 - `smart-folder run` is intentionally conservative. If Eagle rules include
   unsupported logic such as non-`AND` groups, it will stop unless you
   explicitly pass `--allow-partial`.
 - `item bulk-update` can now enforce safety boundaries with `--max-items`,
   `--require-match`, `--skip-unchanged`, and `--save-matches`.
+- `item bulk-update`, `rename-bulk`, `move-bulk`, `organize apply`, and
+  `snapshot restore` can all save reusable plans. `plan apply` now supports
+  both direct HTTP operations and bridge-backed rename or move operations.
 - `snapshot` files are plain JSON documents, so you can archive them with your
   own backups or review them before any restore.
+- `audit dedupe-plan` only writes a reusable trash plan; it never deletes or
+  trashes anything by itself.
 - `item rename-bulk`, `item move-bulk`, and `organize apply` rely on the
   companion bridge plugin when names or folder assignments must change through
   Eagle's Plugin API instead of the local HTTP API.

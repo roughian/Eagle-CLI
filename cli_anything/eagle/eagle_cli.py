@@ -681,6 +681,7 @@ def preset_run_item_list(app: AppContext, name: str) -> None:
 @preset.command("save-bulk-update")
 @click.argument("name")
 @click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to update.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
 @click.option("--limit", type=int, default=200, show_default=True)
 @click.option("--offset", type=int, default=0, show_default=True)
 @click.option("--order-by", default=None)
@@ -700,6 +701,7 @@ def preset_save_bulk_update(
     app: AppContext,
     name: str,
     item_ids: tuple[str, ...],
+    fetch_all: bool,
     limit: int,
     offset: int,
     order_by: str | None,
@@ -717,6 +719,9 @@ def preset_save_bulk_update(
 ) -> None:
     _validate_bulk_update_request(
         item_ids=item_ids,
+        item_file=None,
+        use_last=False,
+        fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
         tags=tags,
@@ -733,6 +738,7 @@ def preset_save_bulk_update(
         "kind": "bulk-update",
         "selector": {
             "item_ids": list(item_ids),
+            "fetch_all": fetch_all,
             **_item_filter_payload_from_args(
                 limit=limit,
                 offset=offset,
@@ -772,6 +778,9 @@ def preset_run_bulk_update(app: AppContext, name: str, save_plan: Path | None) -
     result = _bulk_update_result(
         app,
         item_ids=tuple(selector.get("item_ids") or []),
+        item_file=None,
+        use_last=False,
+        fetch_all=bool(selector.get("fetch_all")),
         limit=selector.get("limit", 200),
         offset=selector.get("offset", 0),
         order_by=selector.get("order_by"),
@@ -803,6 +812,8 @@ def snapshot() -> None:
 @snapshot.command("create")
 @click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
 @click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to snapshot.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
 @click.option("--all", "fetch_all", is_flag=True, help="Capture all matching items by paging with the current limit as page size.")
 @item_filter_options
 @pass_app
@@ -810,6 +821,8 @@ def snapshot_create(
     app: AppContext,
     output_file: Path,
     item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
     fetch_all: bool,
     limit: int,
     offset: int,
@@ -823,6 +836,8 @@ def snapshot_create(
 ) -> None:
     _validate_item_selector_request(
         item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -831,9 +846,10 @@ def snapshot_create(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
     items = _collect_target_items(
         app,
-        item_ids=item_ids,
+        item_ids=resolved_item_ids,
         fetch_all=fetch_all,
         limit=limit,
         offset=offset,
@@ -861,7 +877,7 @@ def snapshot_create(
                 folder_names=folder_names,
                 folder_paths=folder_paths,
             ),
-            "item_ids": list(item_ids),
+            "item_ids": list(resolved_item_ids),
         },
     )
     _write_snapshot(output_file, document)
@@ -891,10 +907,50 @@ def snapshot_show(app: AppContext, snapshot_file: Path) -> None:
     )
 
 
+@snapshot.command("diff")
+@click.argument("snapshot_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--include-names", is_flag=True, help="Compare snapshot names against the current Eagle state.")
+@click.option("--include-folders", is_flag=True, help="Compare snapshot folder assignments against the current Eagle state.")
+@click.option("--save-report", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@pass_app
+def snapshot_diff(
+    app: AppContext,
+    snapshot_file: Path,
+    include_names: bool,
+    include_folders: bool,
+    save_report: Path | None,
+) -> None:
+    document = _load_snapshot(snapshot_file)
+    report = _build_snapshot_diff_report(
+        document,
+        app=app,
+        include_names=include_names,
+        include_folders=include_folders,
+    )
+    if save_report is not None:
+        _write_manifest(save_report, report)
+    _emit_and_remember(
+        app,
+        "snapshot diff",
+        {
+            "status": "success",
+            "data": {
+                **report,
+                "snapshot_file": str(snapshot_file),
+                "saved_report": str(save_report) if save_report is not None else None,
+            },
+        },
+    )
+
+
 @snapshot.command("restore")
 @click.argument("snapshot_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--restore-names", is_flag=True, help="Also restore item names through the bridge plugin.")
 @click.option("--restore-folders", is_flag=True, help="Also restore folder assignments through the bridge plugin.")
+@click.option("--max-items", type=click.IntRange(1, None), default=None, help="Refuse to continue if more than this many snapshot items are restorable.")
+@click.option("--require-match", type=click.IntRange(1, None), default=None, help="Require at least this many snapshot items to still exist in Eagle.")
+@click.option("--save-matches", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write currently matched items to a file before restoring.")
+@click.option("--save-plan", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write the generated restore plan to a JSON file.")
 @click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
 @click.option("--queue-only", is_flag=True, help="Queue bridge work without waiting for a response.")
 @click.option("--skip-unchanged", is_flag=True, help="Skip unchanged items when rebuilding restore operations.")
@@ -904,6 +960,10 @@ def snapshot_restore(
     snapshot_file: Path,
     restore_names: bool,
     restore_folders: bool,
+    max_items: int | None,
+    require_match: int | None,
+    save_matches: Path | None,
+    save_plan: Path | None,
     bridge_timeout: float,
     queue_only: bool,
     skip_unchanged: bool,
@@ -911,18 +971,28 @@ def snapshot_restore(
     document = _load_snapshot(snapshot_file)
     snapshot_items = list(document.get("items") or [])
     item_ids = tuple(str(item.get("id")) for item in snapshot_items if str(item.get("id")))
-    current_items = _collect_target_items(
-        app,
-        item_ids=item_ids,
-        limit=len(item_ids) or 1,
-        offset=0,
-        order_by=None,
-        keyword=None,
-        ext=None,
-        tags=(),
-        folders=(),
-        folder_names=(),
-        folder_paths=(),
+    current_items = (
+        _collect_target_items(
+            app,
+            item_ids=item_ids,
+            limit=len(item_ids) or 1,
+            offset=0,
+            order_by=None,
+            keyword=None,
+            ext=None,
+            tags=(),
+            folders=(),
+            folder_names=(),
+            folder_paths=(),
+        )
+        if item_ids
+        else []
+    )
+    matched_count = _apply_item_guardrails(
+        current_items,
+        max_items=max_items,
+        require_match=require_match,
+        save_matches=save_matches,
     )
     current_by_id = {str(item.get("id")): item for item in current_items}
 
@@ -979,6 +1049,21 @@ def snapshot_restore(
                     }
                 )
 
+    if save_plan is not None:
+        _save_plan_if_requested(
+            save_plan,
+            "snapshot restore",
+            _snapshot_restore_operations(metadata_operations, rename_operations, move_operations),
+            context={
+                "snapshot_file": str(snapshot_file),
+                "matched_count": matched_count,
+                "snapshot_item_count": len(snapshot_items),
+                "restore_names": restore_names,
+                "restore_folders": restore_folders,
+                "skip_unchanged": skip_unchanged,
+            },
+        )
+
     if app.dry_run:
         _emit_and_remember(
             app,
@@ -987,10 +1072,13 @@ def snapshot_restore(
                 "status": "dry-run",
                 "data": {
                     "snapshot_file": str(snapshot_file),
+                    "matched_count": matched_count,
                     "metadata_operations": metadata_operations,
                     "rename_operations": rename_operations,
                     "move_operations": move_operations,
                     "skipped": skipped,
+                    "saved_matches": str(save_matches) if save_matches is not None else None,
+                    "saved_plan": str(save_plan) if save_plan is not None else None,
                 },
             },
         )
@@ -1041,10 +1129,13 @@ def snapshot_restore(
             "status": "success",
             "data": {
                 "snapshot_file": str(snapshot_file),
+                "matched_count": matched_count,
                 "restored_metadata_count": len(metadata_results),
                 "rename_operation_count": len(rename_operations),
                 "move_operation_count": len(move_operations),
                 "skipped": skipped,
+                "saved_matches": str(save_matches) if save_matches is not None else None,
+                "saved_plan": str(save_plan) if save_plan is not None else None,
                 "bridge_results": bridge_results,
             },
         },
@@ -1446,6 +1537,9 @@ def item_update(
 
 @item.command("bulk-update")
 @click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to update.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
 @click.option("--limit", type=int, default=200, show_default=True)
 @click.option("--offset", type=int, default=0, show_default=True)
 @click.option("--order-by", default=None)
@@ -1469,6 +1563,9 @@ def item_update(
 def item_bulk_update(
     app: AppContext,
     item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
     limit: int,
     offset: int,
     order_by: str | None,
@@ -1492,6 +1589,9 @@ def item_bulk_update(
     result = _bulk_update_result(
         app,
         item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
         limit=limit,
         offset=offset,
         order_by=order_by,
@@ -1517,6 +1617,8 @@ def item_bulk_update(
 
 @item.command("rename-bulk")
 @click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to rename.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
 @click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
 @click.option("--limit", type=int, default=200, show_default=True)
 @click.option("--offset", type=int, default=0, show_default=True)
@@ -1532,14 +1634,20 @@ def item_bulk_update(
 @click.option("--replace-from", default=None, help="Replace this exact substring before prefix/suffix are applied.")
 @click.option("--replace-to", default="", help="Replacement string for --replace-from.")
 @click.option("--strip", "strip_names", is_flag=True, help="Trim leading and trailing whitespace before applying prefix/suffix.")
+@click.option("--max-items", type=click.IntRange(1, None), default=None, help="Refuse to continue if more than this many items match.")
+@click.option("--require-match", type=click.IntRange(1, None), default=None, help="Require at least this many matched items.")
 @click.option("--skip-unchanged", is_flag=True)
 @click.option("--save-snapshot", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Save a rollback snapshot before renaming.")
+@click.option("--save-matches", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write matched items to a file before applying updates.")
+@click.option("--save-plan", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write the generated rename plan to a JSON file.")
 @click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
 @click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
 @pass_app
 def item_rename_bulk(
     app: AppContext,
     item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
     fetch_all: bool,
     limit: int,
     offset: int,
@@ -1555,13 +1663,19 @@ def item_rename_bulk(
     replace_from: str | None,
     replace_to: str,
     strip_names: bool,
+    max_items: int | None,
+    require_match: int | None,
     skip_unchanged: bool,
     save_snapshot: Path | None,
+    save_matches: Path | None,
+    save_plan: Path | None,
     bridge_timeout: float,
     queue_only: bool,
 ) -> None:
     _validate_item_selector_request(
         item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -1570,9 +1684,10 @@ def item_rename_bulk(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
     items = _collect_target_items(
         app,
-        item_ids=item_ids,
+        item_ids=resolved_item_ids,
         fetch_all=fetch_all,
         limit=limit,
         offset=offset,
@@ -1583,6 +1698,12 @@ def item_rename_bulk(
         folders=folders,
         folder_names=folder_names,
         folder_paths=folder_paths,
+    )
+    matched_count = _apply_item_guardrails(
+        items,
+        max_items=max_items,
+        require_match=require_match,
+        save_matches=save_matches,
     )
     if save_snapshot is not None:
         _write_snapshot(save_snapshot, _snapshot_document("item rename-bulk", items))
@@ -1595,6 +1716,30 @@ def item_rename_bulk(
         strip_names=strip_names,
         skip_unchanged=skip_unchanged,
     )
+    if save_plan is not None:
+        _save_plan_if_requested(
+            save_plan,
+            "item rename-bulk",
+            [_make_bridge_operation("rename_items", {"operations": operations}, description="Apply bulk item renames")],
+            context={
+                "matched_count": matched_count,
+                "operation_count": len(operations),
+                "skipped_count": len(skipped),
+                "selector": _item_selector_context(
+                    item_ids=resolved_item_ids,
+                    fetch_all=fetch_all,
+                    limit=limit,
+                    offset=offset,
+                    order_by=order_by,
+                    keyword=keyword,
+                    ext=ext,
+                    tags=tags,
+                    folders=folders,
+                    folder_names=folder_names,
+                    folder_paths=folder_paths,
+                ),
+            },
+        )
     if app.dry_run:
         _emit_and_remember(
             app,
@@ -1602,11 +1747,13 @@ def item_rename_bulk(
             {
                 "status": "dry-run",
                 "data": {
-                    "matched_count": len(items),
+                    "matched_count": matched_count,
                     "operation_count": len(operations),
                     "operations": operations,
                     "skipped": skipped,
                     "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+                    "saved_matches": str(save_matches) if save_matches is not None else None,
+                    "saved_plan": str(save_plan) if save_plan is not None else None,
                 },
             },
         )
@@ -1623,11 +1770,13 @@ def item_rename_bulk(
         {
             "status": "success",
             "data": {
-                "matched_count": len(items),
+                "matched_count": matched_count,
                 "operation_count": len(operations),
                 "operations": operations,
                 "skipped": skipped,
                 "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+                "saved_matches": str(save_matches) if save_matches is not None else None,
+                "saved_plan": str(save_plan) if save_plan is not None else None,
                 "bridge": bridge_result,
             },
         },
@@ -1636,6 +1785,8 @@ def item_rename_bulk(
 
 @item.command("move-bulk")
 @click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to move.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
 @click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
 @click.option("--limit", type=int, default=200, show_default=True)
 @click.option("--offset", type=int, default=0, show_default=True)
@@ -1650,14 +1801,20 @@ def item_rename_bulk(
 @click.option("--target-folder-name", default=None)
 @click.option("--target-folder-path", default=None)
 @click.option("--ensure-target-path", default=None, help="Create the target folder path before moving items.")
+@click.option("--max-items", type=click.IntRange(1, None), default=None, help="Refuse to continue if more than this many items match.")
+@click.option("--require-match", type=click.IntRange(1, None), default=None, help="Require at least this many matched items.")
 @click.option("--skip-unchanged", is_flag=True)
 @click.option("--save-snapshot", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Save a rollback snapshot before moving.")
+@click.option("--save-matches", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write matched items to a file before applying updates.")
+@click.option("--save-plan", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write the generated move plan to a JSON file.")
 @click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
 @click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
 @pass_app
 def item_move_bulk(
     app: AppContext,
     item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
     fetch_all: bool,
     limit: int,
     offset: int,
@@ -1672,13 +1829,19 @@ def item_move_bulk(
     target_folder_name: str | None,
     target_folder_path: str | None,
     ensure_target_path: str | None,
+    max_items: int | None,
+    require_match: int | None,
     skip_unchanged: bool,
     save_snapshot: Path | None,
+    save_matches: Path | None,
+    save_plan: Path | None,
     bridge_timeout: float,
     queue_only: bool,
 ) -> None:
     _validate_item_selector_request(
         item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -1687,9 +1850,10 @@ def item_move_bulk(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
     items = _collect_target_items(
         app,
-        item_ids=item_ids,
+        item_ids=resolved_item_ids,
         fetch_all=fetch_all,
         limit=limit,
         offset=offset,
@@ -1700,6 +1864,12 @@ def item_move_bulk(
         folders=folders,
         folder_names=folder_names,
         folder_paths=folder_paths,
+    )
+    matched_count = _apply_item_guardrails(
+        items,
+        max_items=max_items,
+        require_match=require_match,
+        save_matches=save_matches,
     )
     if save_snapshot is not None:
         _write_snapshot(save_snapshot, _snapshot_document("item move-bulk", items))
@@ -1716,6 +1886,31 @@ def item_move_bulk(
         target_folder_path=folder.path if folder is not None else "",
         skip_unchanged=skip_unchanged,
     )
+    if save_plan is not None:
+        _save_plan_if_requested(
+            save_plan,
+            "item move-bulk",
+            [_make_bridge_operation("move_items", {"operations": operations}, description="Apply bulk item moves")],
+            context={
+                "matched_count": matched_count,
+                "operation_count": len(operations),
+                "skipped_count": len(skipped),
+                "target_folder": _folder_row(folder),
+                "selector": _item_selector_context(
+                    item_ids=resolved_item_ids,
+                    fetch_all=fetch_all,
+                    limit=limit,
+                    offset=offset,
+                    order_by=order_by,
+                    keyword=keyword,
+                    ext=ext,
+                    tags=tags,
+                    folders=folders,
+                    folder_names=folder_names,
+                    folder_paths=folder_paths,
+                ),
+            },
+        )
     if app.dry_run:
         _emit_and_remember(
             app,
@@ -1723,13 +1918,15 @@ def item_move_bulk(
             {
                 "status": "dry-run",
                 "data": {
-                    "matched_count": len(items),
+                    "matched_count": matched_count,
                     "operation_count": len(operations),
                     "target_folder": _folder_row(folder) if folder is not None else None,
                     "ensure_result": ensure_result,
                     "operations": operations,
                     "skipped": skipped,
                     "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+                    "saved_matches": str(save_matches) if save_matches is not None else None,
+                    "saved_plan": str(save_plan) if save_plan is not None else None,
                 },
             },
         )
@@ -1746,13 +1943,15 @@ def item_move_bulk(
         {
             "status": "success",
             "data": {
-                "matched_count": len(items),
+                "matched_count": matched_count,
                 "operation_count": len(operations),
                 "target_folder": _folder_row(folder) if folder is not None else None,
                 "ensure_result": ensure_result,
                 "operations": operations,
                 "skipped": skipped,
                 "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+                "saved_matches": str(save_matches) if save_matches is not None else None,
+                "saved_plan": str(save_plan) if save_plan is not None else None,
                 "bridge": bridge_result,
             },
         },
@@ -2163,6 +2362,9 @@ def audit() -> None:
 
 
 @audit.command("duplicates")
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to audit.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
 @click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
 @click.option("--mode", "modes", multiple=True, type=click.Choice(["name", "url", "name-size", "name-ext"]), help="Repeatable duplicate strategy.")
 @click.option("--top", type=click.IntRange(1, None), default=10, show_default=True)
@@ -2171,6 +2373,9 @@ def audit() -> None:
 @pass_app
 def audit_duplicates(
     app: AppContext,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
     fetch_all: bool,
     modes: tuple[str, ...],
     top: int,
@@ -2186,7 +2391,9 @@ def audit_duplicates(
     folder_paths: tuple[str, ...],
 ) -> None:
     _validate_item_selector_request(
-        item_ids=(),
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -2195,8 +2402,10 @@ def audit_duplicates(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    query = _query_items(
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    query = _query_or_collect_items(
         app,
+        item_ids=resolved_item_ids,
         fetch_all=fetch_all,
         limit=limit,
         offset=offset,
@@ -2227,6 +2436,9 @@ def audit_duplicates(
 
 
 @audit.command("cleanup")
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to audit.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
 @click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
 @click.option("--sample-limit", type=click.IntRange(1, None), default=10, show_default=True)
 @click.option("--save-report", type=click.Path(dir_okay=False, path_type=Path), default=None)
@@ -2234,6 +2446,9 @@ def audit_duplicates(
 @pass_app
 def audit_cleanup(
     app: AppContext,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
     fetch_all: bool,
     sample_limit: int,
     save_report: Path | None,
@@ -2248,7 +2463,9 @@ def audit_cleanup(
     folder_paths: tuple[str, ...],
 ) -> None:
     _validate_item_selector_request(
-        item_ids=(),
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -2257,8 +2474,10 @@ def audit_cleanup(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    query = _query_items(
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    query = _query_or_collect_items(
         app,
+        item_ids=resolved_item_ids,
         fetch_all=fetch_all,
         limit=limit,
         offset=offset,
@@ -2288,6 +2507,86 @@ def audit_cleanup(
     )
 
 
+@audit.command("dedupe-plan")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect for duplicates.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--mode", type=click.Choice(["name", "url", "name-size", "name-ext"]), default="name-size", show_default=True)
+@click.option("--keep", type=click.Choice(["first", "last", "largest", "smallest", "newest", "oldest"]), default="largest", show_default=True)
+@click.option("--batch-size", type=click.IntRange(1, None), default=100, show_default=True)
+@click.option("--save-report", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@item_filter_options
+@pass_app
+def audit_dedupe_plan(
+    app: AppContext,
+    output_file: Path,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    mode: str,
+    keep: str,
+    batch_size: int,
+    save_report: Path | None,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    query = _query_or_collect_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    report = _build_dedupe_plan_report(query["items"], mode=mode, keep=keep, batch_size=batch_size)
+    report["query"] = query["query"]
+    report["pages"] = query["pages"]
+    _write_plan(output_file, _plan_document("audit dedupe-plan", report["operations"], context={k: v for k, v in report.items() if k != "operations"}))
+    if save_report is not None:
+        _write_manifest(save_report, report)
+    _emit_and_remember(
+        app,
+        "audit dedupe-plan",
+        {
+            "status": "success",
+            "data": {
+                **report,
+                "saved_plan": str(output_file),
+                "saved_report": str(save_report) if save_report is not None else None,
+            },
+        },
+    )
+
+
 @cli.group()
 def organize() -> None:
     """Higher-level organization workflows."""
@@ -2295,6 +2594,8 @@ def organize() -> None:
 
 @organize.command("apply")
 @click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to organize.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
 @click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
 @click.option("--limit", type=int, default=200, show_default=True)
 @click.option("--offset", type=int, default=0, show_default=True)
@@ -2319,6 +2620,8 @@ def organize() -> None:
 @click.option("--replace-from", default=None)
 @click.option("--replace-to", default="")
 @click.option("--strip", "strip_names", is_flag=True)
+@click.option("--max-items", type=click.IntRange(1, None), default=None, help="Refuse to continue if more than this many items match.")
+@click.option("--require-match", type=click.IntRange(1, None), default=None, help="Require at least this many matched items.")
 @click.option("--skip-unchanged", is_flag=True)
 @click.option("--save-snapshot", type=click.Path(dir_okay=False, path_type=Path), default=None)
 @click.option("--save-matches", type=click.Path(dir_okay=False, path_type=Path), default=None)
@@ -2329,6 +2632,8 @@ def organize() -> None:
 def organize_apply(
     app: AppContext,
     item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
     fetch_all: bool,
     limit: int,
     offset: int,
@@ -2353,6 +2658,8 @@ def organize_apply(
     replace_from: str | None,
     replace_to: str,
     strip_names: bool,
+    max_items: int | None,
+    require_match: int | None,
     skip_unchanged: bool,
     save_snapshot: Path | None,
     save_matches: Path | None,
@@ -2362,6 +2669,8 @@ def organize_apply(
 ) -> None:
     _validate_item_selector_request(
         item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -2370,9 +2679,10 @@ def organize_apply(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
     items = _collect_target_items(
         app,
-        item_ids=item_ids,
+        item_ids=resolved_item_ids,
         fetch_all=fetch_all,
         limit=limit,
         offset=offset,
@@ -2383,6 +2693,12 @@ def organize_apply(
         folders=folders,
         folder_names=folder_names,
         folder_paths=folder_paths,
+    )
+    matched_count = _apply_item_guardrails(
+        items,
+        max_items=max_items,
+        require_match=require_match,
+        save_matches=save_matches,
     )
     if save_snapshot is not None:
         _write_snapshot(save_snapshot, _snapshot_document("organize apply", items))
@@ -2396,6 +2712,9 @@ def organize_apply(
         metadata_result = _bulk_update_result(
             app,
             item_ids=tuple(str(item.get("id")) for item in items if str(item.get("id"))),
+            item_file=None,
+            use_last=False,
+            fetch_all=False,
             limit=len(items) or 1,
             offset=0,
             order_by=None,
@@ -2410,11 +2729,11 @@ def organize_apply(
             annotation=annotation,
             source_url=source_url,
             star=star,
-            max_items=None,
-            require_match=None,
+            max_items=matched_count,
+            require_match=0,
             skip_unchanged=skip_unchanged,
-            save_matches=save_matches,
-            save_plan=save_plan,
+            save_matches=None,
+            save_plan=None,
         )
 
     ensure_result = None
@@ -2449,6 +2768,36 @@ def organize_apply(
             skip_unchanged=skip_unchanged,
         )
 
+    aggregate_operations = _organize_plan_operations(
+        metadata_result=metadata_result,
+        rename_operations=rename_operations,
+        move_operations=move_operations,
+    )
+    if save_plan is not None:
+        _save_plan_if_requested(
+            save_plan,
+            "organize apply",
+            aggregate_operations,
+            context={
+                "matched_count": matched_count,
+                "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+                "target_folder": _folder_row(target_folder),
+                "selector": _item_selector_context(
+                    item_ids=resolved_item_ids,
+                    fetch_all=fetch_all,
+                    limit=limit,
+                    offset=offset,
+                    order_by=order_by,
+                    keyword=keyword,
+                    ext=ext,
+                    tags=tags,
+                    folders=folders,
+                    folder_names=folder_names,
+                    folder_paths=folder_paths,
+                ),
+            },
+        )
+
     if app.dry_run:
         _emit_and_remember(
             app,
@@ -2456,8 +2805,10 @@ def organize_apply(
             {
                 "status": "dry-run",
                 "data": {
-                    "matched_count": len(items),
+                    "matched_count": matched_count,
                     "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+                    "saved_matches": str(save_matches) if save_matches is not None else None,
+                    "saved_plan": str(save_plan) if save_plan is not None else None,
                     "metadata": metadata_result,
                     "target_folder": _folder_row(target_folder) if target_folder is not None else None,
                     "ensure_result": ensure_result,
@@ -2502,8 +2853,10 @@ def organize_apply(
         {
             "status": "success",
             "data": {
-                "matched_count": len(items),
+                "matched_count": matched_count,
                 "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+                "saved_matches": str(save_matches) if save_matches is not None else None,
+                "saved_plan": str(save_plan) if save_plan is not None else None,
                 "metadata": metadata_result,
                 "target_folder": _folder_row(target_folder) if target_folder is not None else None,
                 "ensure_result": ensure_result,
@@ -2530,6 +2883,15 @@ def plan_show(app: AppContext, plan_file: Path) -> None:
     _emit_and_remember(app, "plan show", {"status": "success", "data": data})
 
 
+@plan.command("stats")
+@click.argument("plan_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@pass_app
+def plan_stats(app: AppContext, plan_file: Path) -> None:
+    data = json.loads(plan_file.read_text(encoding="utf-8"))
+    operations = _extract_operations_from_document(data)
+    _emit_and_remember(app, "plan stats", {"status": "success", "data": _plan_stats(plan_file, data, operations)})
+
+
 @plan.command("save-last")
 @click.argument("plan_file", type=click.Path(dir_okay=False, path_type=Path))
 @pass_app
@@ -2544,8 +2906,10 @@ def plan_save_last(app: AppContext, plan_file: Path) -> None:
 
 @plan.command("apply")
 @click.argument("plan_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue bridge work without waiting for Eagle to process it.")
 @pass_app
-def plan_apply(app: AppContext, plan_file: Path) -> None:
+def plan_apply(app: AppContext, plan_file: Path, bridge_timeout: float, queue_only: bool) -> None:
     data = json.loads(plan_file.read_text(encoding="utf-8"))
     operations = _extract_operations_from_document(data)
     if not operations:
@@ -2566,19 +2930,36 @@ def plan_apply(app: AppContext, plan_file: Path) -> None:
 
     results = []
     for operation in operations:
-        response = app.client.raw_request(
-            operation.get("method", "POST"),
-            operation["endpoint"],
-            payload=operation.get("payload"),
-        )
-        results.append(
-            {
-                "endpoint": operation["endpoint"],
-                "method": operation.get("method", "POST"),
-                "status": response.get("status", "success"),
-                "description": operation.get("description"),
-            }
-        )
+        if operation.get("kind") == "bridge":
+            response = _bridge_request(
+                operation["action"],
+                operation.get("payload") or {},
+                timeout_seconds=bridge_timeout,
+                queue_only=queue_only,
+            )
+            results.append(
+                {
+                    "kind": "bridge",
+                    "action": operation["action"],
+                    "status": response.get("status", "success"),
+                    "description": operation.get("description"),
+                }
+            )
+        else:
+            response = app.client.raw_request(
+                operation.get("method", "POST"),
+                operation["endpoint"],
+                payload=operation.get("payload"),
+            )
+            results.append(
+                {
+                    "kind": "http",
+                    "endpoint": operation["endpoint"],
+                    "method": operation.get("method", "POST"),
+                    "status": response.get("status", "success"),
+                    "description": operation.get("description"),
+                }
+            )
 
     _emit_and_remember(
         app,
@@ -2803,10 +3184,63 @@ def _query_items_from_raw_params(app: AppContext, raw_params: dict[str, Any], *,
     }
 
 
+def _query_or_collect_items(
+    app: AppContext,
+    *,
+    item_ids: tuple[str, ...],
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> dict[str, Any]:
+    if item_ids:
+        items = _collect_target_items(
+            app,
+            item_ids=item_ids,
+            fetch_all=False,
+            limit=len(item_ids) or 1,
+            offset=0,
+            order_by=None,
+            keyword=None,
+            ext=None,
+            tags=(),
+            folders=(),
+            folder_names=(),
+            folder_paths=(),
+        )
+        return {
+            "items": items,
+            "pages": 1,
+            "query": {"item_ids": list(item_ids)},
+        }
+    return _query_items(
+        app,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+
+
 def _bulk_update_result(
     app: AppContext,
     *,
     item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
     limit: int,
     offset: int,
     order_by: str | None,
@@ -2829,6 +3263,9 @@ def _bulk_update_result(
 ) -> dict[str, Any]:
     _validate_bulk_update_request(
         item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
         tags=tags,
@@ -2841,10 +3278,12 @@ def _bulk_update_result(
         source_url=source_url,
         star=star,
     )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
 
     source_items = _collect_target_items(
         app,
-        item_ids=item_ids,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
         limit=limit,
         offset=offset,
         order_by=order_by,
@@ -2855,13 +3294,12 @@ def _bulk_update_result(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    matched_count = len(source_items)
-    if require_match is not None and matched_count < require_match:
-        raise click.ClickException(f"Matched {matched_count} item(s), which is below the required minimum of {require_match}.")
-    if max_items is not None and matched_count > max_items:
-        raise click.ClickException(f"Matched {matched_count} item(s), which exceeds --max-items {max_items}.")
-    if save_matches is not None:
-        _write_items_export(save_matches, source_items, "auto")
+    matched_count = _apply_item_guardrails(
+        source_items,
+        max_items=max_items,
+        require_match=require_match,
+        save_matches=save_matches,
+    )
 
     operations: list[dict[str, Any]] = []
     skipped_unchanged: list[dict[str, Any]] = []
@@ -2928,7 +3366,8 @@ def _bulk_update_result(
                         folder_names=folder_names,
                         folder_paths=folder_paths,
                     ),
-                    "item_ids": list(item_ids),
+                    "item_ids": list(resolved_item_ids),
+                    "fetch_all": fetch_all,
                 },
             ),
         )
@@ -2983,6 +3422,9 @@ def _bulk_update_result(
 def _validate_bulk_update_request(
     *,
     item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
     keyword: str | None,
     ext: str | None,
     tags: tuple[str, ...],
@@ -2997,10 +3439,18 @@ def _validate_bulk_update_request(
 ) -> None:
     if not any([set_tags, add_tags, annotation is not None, source_url is not None, star is not None]):
         raise click.ClickException("Provide at least one mutation field such as --set-tag, --add-tag, --annotation, --url, or --star.")
-    if item_ids and any([keyword, ext, tags, folders, folder_names, folder_paths]):
-        raise click.ClickException("Use either explicit --item-id values or filters, not both.")
-    if not item_ids and not any([keyword, ext, tags, folders, folder_names, folder_paths]):
-        raise click.ClickException("Refusing to bulk-update without item IDs or at least one filter.")
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
 
 
 def _changed_item_fields(item: dict[str, Any], payload: dict[str, Any]) -> list[str]:
@@ -3019,6 +3469,8 @@ def _changed_item_fields(item: dict[str, Any], payload: dict[str, Any]) -> list[
 def _validate_item_selector_request(
     *,
     item_ids: tuple[str, ...],
+    item_file: Path | None = None,
+    use_last: bool = False,
     fetch_all: bool,
     keyword: str | None,
     ext: str | None,
@@ -3027,9 +3479,10 @@ def _validate_item_selector_request(
     folder_names: tuple[str, ...],
     folder_paths: tuple[str, ...],
 ) -> None:
-    if item_ids and any([keyword, ext, tags, folders, folder_names, folder_paths]):
-        raise click.ClickException("Use either explicit --item-id values or filters, not both.")
-    if not item_ids and not fetch_all and not any([keyword, ext, tags, folders, folder_names, folder_paths]):
+    has_direct_selector = bool(item_ids) or item_file is not None or use_last
+    if has_direct_selector and any([fetch_all, keyword, ext, tags, folders, folder_names, folder_paths]):
+        raise click.ClickException("Use either explicit item selectors (--item-id/--item-file/--last) or filters, not both.")
+    if not has_direct_selector and not fetch_all and not any([keyword, ext, tags, folders, folder_names, folder_paths]):
         raise click.ClickException("Provide explicit --item-id values, at least one filter, or --all.")
 
 
@@ -3291,6 +3744,181 @@ def _build_cleanup_report(items: list[dict[str, Any]], *, sample_limit: int) -> 
     }
 
 
+def _build_dedupe_plan_report(
+    items: list[dict[str, Any]],
+    *,
+    mode: str,
+    keep: str,
+    batch_size: int,
+) -> dict[str, Any]:
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        key = _duplicate_key(item, mode)
+        if key is None:
+            continue
+        buckets.setdefault(key, []).append(item)
+
+    duplicate_groups: list[dict[str, Any]] = []
+    trash_ids: list[str] = []
+    for key, group_items in buckets.items():
+        if len(group_items) < 2:
+            continue
+        keeper = _choose_duplicate_keeper(group_items, keep=keep)
+        discard = [item for item in group_items if str(item.get("id")) != str(keeper.get("id"))]
+        trash_ids.extend(str(item.get("id")) for item in discard if str(item.get("id")))
+        duplicate_groups.append(
+            {
+                "key": key,
+                "count": len(group_items),
+                "keep": _minimal_item_row(keeper),
+                "trash": [_minimal_item_row(item) for item in discard],
+            }
+        )
+
+    unique_trash_ids = _unique_preserve_order(trash_ids)
+    operations = [
+        _make_operation(
+            "POST",
+            "/api/item/moveToTrash",
+            {"itemIds": batch},
+            description=f"Move {len(batch)} duplicate item(s) to trash",
+        )
+        for batch in _chunked(unique_trash_ids, batch_size)
+    ]
+    duplicate_groups.sort(key=lambda row: (-row["count"], row["key"]))
+    return {
+        "mode": mode,
+        "keep": keep,
+        "group_count": len(duplicate_groups),
+        "trash_count": len(unique_trash_ids),
+        "duplicate_groups": duplicate_groups,
+        "operations": operations,
+    }
+
+
+def _choose_duplicate_keeper(group_items: list[dict[str, Any]], *, keep: str) -> dict[str, Any]:
+    if keep == "first":
+        return group_items[0]
+    if keep == "last":
+        return group_items[-1]
+    if keep == "largest":
+        return max(group_items, key=lambda item: (int(item.get("size") or 0), str(item.get("id") or "")))
+    if keep == "smallest":
+        return min(group_items, key=lambda item: (int(item.get("size") or 0), str(item.get("id") or "")))
+    if keep == "newest":
+        return max(group_items, key=lambda item: (_item_sort_timestamp(item), str(item.get("id") or "")))
+    if keep == "oldest":
+        return min(group_items, key=lambda item: (_item_sort_timestamp(item), str(item.get("id") or "")))
+    raise click.ClickException(f"Unsupported duplicate keep strategy: {keep}")
+
+
+def _item_sort_timestamp(item: dict[str, Any]) -> int:
+    for key in ["modificationTime", "mtime", "btime"]:
+        value = item.get(key)
+        if value not in (None, ""):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+    return 0
+
+
+def _build_snapshot_diff_report(
+    document: dict[str, Any],
+    *,
+    app: AppContext,
+    include_names: bool,
+    include_folders: bool,
+) -> dict[str, Any]:
+    snapshot_items = list(document.get("items") or [])
+    item_ids = tuple(str(item.get("id")) for item in snapshot_items if str(item.get("id")))
+    current_items = (
+        _collect_target_items(
+            app,
+            item_ids=item_ids,
+            fetch_all=False,
+            limit=len(item_ids) or 1,
+            offset=0,
+            order_by=None,
+            keyword=None,
+            ext=None,
+            tags=(),
+            folders=(),
+            folder_names=(),
+            folder_paths=(),
+        )
+        if item_ids
+        else []
+    )
+    current_by_id = {str(item.get("id")): item for item in current_items}
+
+    changed: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    unchanged = 0
+    for snapshot_item in snapshot_items:
+        item_id = str(snapshot_item.get("id") or "")
+        current_item = current_by_id.get(item_id)
+        if current_item is None:
+            missing.append({"id": item_id, "name": snapshot_item.get("name"), "reason": "missing"})
+            continue
+        differences = _snapshot_item_differences(
+            snapshot_item,
+            current_item,
+            include_names=include_names,
+            include_folders=include_folders,
+        )
+        if differences:
+            changed.append(
+                {
+                    "id": item_id,
+                    "name": current_item.get("name"),
+                    "differences": differences,
+                }
+            )
+        else:
+            unchanged += 1
+
+    return {
+        "kind": "eagle-cli-snapshot-diff",
+        "snapshot": _snapshot_summary(document),
+        "counts": {
+            "snapshot_items": len(snapshot_items),
+            "matched_items": len(current_items),
+            "changed_items": len(changed),
+            "missing_items": len(missing),
+            "unchanged_items": unchanged,
+        },
+        "changed": changed,
+        "missing": missing,
+    }
+
+
+def _snapshot_item_differences(
+    snapshot_item: dict[str, Any],
+    current_item: dict[str, Any],
+    *,
+    include_names: bool,
+    include_folders: bool,
+) -> list[dict[str, Any]]:
+    differences: list[dict[str, Any]] = []
+    metadata_payload = {
+        "tags": list(snapshot_item.get("tags") or []),
+        "annotation": snapshot_item.get("annotation"),
+        "url": snapshot_item.get("url"),
+        "star": snapshot_item.get("star"),
+    }
+    for field in _changed_item_fields(current_item, {"id": current_item.get("id"), **metadata_payload}):
+        differences.append({"field": field, "snapshot": metadata_payload.get(field), "current": current_item.get(field)})
+    if include_names and str(snapshot_item.get("name") or "") != str(current_item.get("name") or ""):
+        differences.append({"field": "name", "snapshot": snapshot_item.get("name"), "current": current_item.get("name")})
+    if include_folders:
+        snapshot_folders = [str(folder_id) for folder_id in snapshot_item.get("folders") or [] if str(folder_id)]
+        current_folders = [str(folder_id) for folder_id in current_item.get("folders") or [] if str(folder_id)]
+        if snapshot_folders != current_folders:
+            differences.append({"field": "folders", "snapshot": snapshot_folders, "current": current_folders})
+    return differences
+
+
 def _resolve_move_target(
     app: AppContext,
     *,
@@ -3362,6 +3990,179 @@ def _collect_target_items(
         folder_paths=folder_paths,
     )
     return list(query["items"])
+
+
+def _item_selector_context(
+    *,
+    item_ids: tuple[str, ...],
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> dict[str, Any]:
+    if item_ids:
+        return {"item_ids": list(item_ids)}
+    return {
+        "fetch_all": fetch_all,
+        "filters": _item_filter_payload_from_args(
+            limit=limit,
+            offset=offset,
+            order_by=order_by,
+            keyword=keyword,
+            ext=ext,
+            tags=tags,
+            folders=folders,
+            folder_names=folder_names,
+            folder_paths=folder_paths,
+        ),
+    }
+
+
+def _snapshot_restore_operations(
+    metadata_operations: list[dict[str, Any]],
+    rename_operations: list[dict[str, Any]],
+    move_operations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    operations = list(metadata_operations)
+    if rename_operations:
+        operations.append(_make_bridge_operation("rename_items", {"operations": rename_operations}, description="Restore item names from snapshot"))
+    if move_operations:
+        operations.append(_make_bridge_operation("move_items", {"operations": move_operations}, description="Restore item folders from snapshot"))
+    return operations
+
+
+def _organize_plan_operations(
+    *,
+    metadata_result: dict[str, Any] | None,
+    rename_operations: list[dict[str, Any]],
+    move_operations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    operations: list[dict[str, Any]] = []
+    if isinstance(metadata_result, dict):
+        operations.extend(_extract_operations_from_document(metadata_result))
+    if rename_operations:
+        operations.append(_make_bridge_operation("rename_items", {"operations": rename_operations}, description="Apply organize rename operations"))
+    if move_operations:
+        operations.append(_make_bridge_operation("move_items", {"operations": move_operations}, description="Apply organize move operations"))
+    return operations
+
+
+def _resolve_item_selector_ids(
+    app: AppContext,
+    *,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+) -> tuple[str, ...]:
+    resolved = [str(item_id) for item_id in item_ids if str(item_id)]
+    if item_file is not None:
+        resolved.extend(_load_item_ids_from_file(item_file))
+    if use_last:
+        if not app.state.last_item_ids:
+            raise click.ClickException("No item IDs are available from the last command.")
+        resolved.extend(str(item_id) for item_id in app.state.last_item_ids if str(item_id))
+    return tuple(_unique_preserve_order(resolved))
+
+
+def _load_item_ids_from_file(path: Path) -> list[str]:
+    suffix = path.suffix.casefold()
+    if suffix == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        ids = _extract_item_ids_from_document(payload)
+    elif suffix == ".jsonl":
+        ids = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                ids.extend(_extract_item_ids_from_document(json.loads(line)))
+    elif suffix == ".csv":
+        ids = []
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                if row.get("id"):
+                    ids.append(str(row["id"]))
+                if row.get("item_id"):
+                    ids.append(str(row["item_id"]))
+                if row.get("itemIds"):
+                    ids.extend(part.strip() for part in str(row["itemIds"]).split(",") if part.strip())
+    else:
+        ids = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    resolved = _unique_preserve_order([item_id for item_id in ids if item_id])
+    if not resolved:
+        raise click.ClickException(f"Could not find any item IDs in {path}.")
+    return resolved
+
+
+def _extract_item_ids_from_document(value: Any) -> list[str]:
+    ids: list[str] = []
+
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            item_ids = node.get("itemIds")
+            if isinstance(item_ids, list):
+                ids.extend(str(item_id) for item_id in item_ids if str(item_id))
+            single_item_id = node.get("item_id")
+            if isinstance(single_item_id, str) and single_item_id:
+                ids.append(single_item_id)
+            plural_ids = node.get("item_ids")
+            if isinstance(plural_ids, list):
+                ids.extend(str(item_id) for item_id in plural_ids if str(item_id))
+            node_id = node.get("id")
+            if isinstance(node_id, str) and node_id and _node_looks_like_item(node):
+                ids.append(node_id)
+            for child in node.values():
+                visit(child)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child)
+
+    visit(value)
+    return _unique_preserve_order(ids)
+
+
+def _node_looks_like_item(node: dict[str, Any]) -> bool:
+    if "children" in node or "extendTags" in node:
+        return False
+    item_markers = {
+        "annotation",
+        "ext",
+        "folders",
+        "isDeleted",
+        "palettes",
+        "size",
+        "star",
+        "tags",
+        "url",
+    }
+    if item_markers.intersection(node.keys()):
+        return True
+    folder_markers = {"depth", "parent_id", "parent_path", "leaf_id", "folder_id"}
+    if "id" in node and "name" in node and "payload" not in node and not folder_markers.intersection(node.keys()):
+        return True
+    return False
+
+
+def _apply_item_guardrails(
+    items: list[dict[str, Any]],
+    *,
+    max_items: int | None,
+    require_match: int | None,
+    save_matches: Path | None,
+) -> int:
+    matched_count = len(items)
+    if require_match is not None and matched_count < require_match:
+        raise click.ClickException(f"Matched {matched_count} item(s), which is below the required minimum of {require_match}.")
+    if max_items is not None and matched_count > max_items:
+        raise click.ClickException(f"Matched {matched_count} item(s), which exceeds --max-items {max_items}.")
+    if save_matches is not None:
+        _write_items_export(save_matches, items, "auto")
+    return matched_count
 
 
 def _resolve_folder_filters(
@@ -3998,6 +4799,13 @@ def _make_operation(method: str, endpoint: str, payload: dict[str, Any] | None, 
     return operation
 
 
+def _make_bridge_operation(action: str, payload: dict[str, Any], *, description: str | None = None) -> dict[str, Any]:
+    operation: dict[str, Any] = {"kind": "bridge", "action": action, "payload": payload}
+    if description:
+        operation["description"] = description
+    return operation
+
+
 def _plan_document(command_name: str, operations: list[dict[str, Any]], *, context: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "kind": "eagle-cli-plan",
@@ -4011,6 +4819,12 @@ def _plan_document(command_name: str, operations: list[dict[str, Any]], *, conte
 def _write_plan(path: Path, document: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _save_plan_if_requested(path: Path | None, command_name: str, operations: list[dict[str, Any]], *, context: dict[str, Any] | None = None) -> None:
+    if path is None:
+        return
+    _write_plan(path, _plan_document(command_name, operations, context=context))
 
 
 def _write_manifest(path: Path, document: dict[str, Any]) -> None:
@@ -4030,6 +4844,38 @@ def _extract_operations_from_document(data: Any) -> list[dict[str, Any]]:
         if isinstance(nested_operations, list):
             return nested_operations
     return []
+
+
+def _plan_stats(plan_file: Path, data: dict[str, Any], operations: list[dict[str, Any]]) -> dict[str, Any]:
+    method_counts: dict[str, int] = {}
+    endpoint_counts: dict[str, int] = {}
+    bridge_action_counts: dict[str, int] = {}
+    for operation in operations:
+        if operation.get("kind") == "bridge":
+            action = str(operation.get("action") or "bridge")
+            bridge_action_counts[action] = bridge_action_counts.get(action, 0) + 1
+            continue
+        method = str(operation.get("method") or "POST").upper()
+        endpoint = str(operation.get("endpoint") or "")
+        method_counts[method] = method_counts.get(method, 0) + 1
+        endpoint_counts[endpoint] = endpoint_counts.get(endpoint, 0) + 1
+    return {
+        "plan_file": str(plan_file),
+        "kind": data.get("kind"),
+        "version": data.get("version"),
+        "command": data.get("command"),
+        "operation_count": len(operations),
+        "http_methods": method_counts,
+        "endpoints": endpoint_counts,
+        "bridge_actions": bridge_action_counts,
+        "context": data.get("context") or {},
+    }
+
+
+def _chunked(items: list[str], size: int) -> list[list[str]]:
+    if not items:
+        return []
+    return [items[index : index + size] for index in range(0, len(items), size)]
 
 
 @cli.result_callback()

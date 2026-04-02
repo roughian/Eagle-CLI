@@ -123,6 +123,23 @@ class EagleCliTests(unittest.TestCase):
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
+    def test_item_list_all_pages_until_short_page(self, mock_item_list, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_list.side_effect = [
+            {"status": "success", "data": [{"id": "a"}, {"id": "b"}]},
+            {"status": "success", "data": [{"id": "c"}]},
+        ]
+        result = self.runner.invoke(cli, ["--json", "item", "list", "--all", "--limit", "2"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(len(payload["data"]), 3)
+        self.assertEqual(mock_item_list.call_count, 2)
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
     @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
     def test_folder_ensure_path_dry_run_plans_creation(self, mock_folder_list, mock_load, _mock_save):
         from cli_anything.eagle.core.state import SessionState
@@ -353,6 +370,112 @@ class EagleCliTests(unittest.TestCase):
         payload = json.loads(result.output)
         self.assertEqual(payload["data"][0]["property"], "type")
         self.assertEqual(payload["data"][0]["method"], "equal")
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.library_info")
+    def test_smart_folder_run_translates_into_item_query(self, mock_library_info, mock_item_list, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_library_info.return_value = {
+            "status": "success",
+            "data": {
+                "smartFolders": [
+                    {
+                        "id": "sf1",
+                        "name": "Images",
+                        "children": [],
+                        "conditions": [
+                            {
+                                "boolean": "TRUE",
+                                "match": "AND",
+                                "rules": [
+                                    {"property": "type", "method": "equal", "value": "png"},
+                                    {"property": "folders", "method": "intersection", "value": ["folder-1"]},
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+        mock_item_list.return_value = {"status": "success", "data": [{"id": "item-1", "name": "A"}]}
+        result = self.runner.invoke(cli, ["--json", "smart-folder", "run", "--name", "Images"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["item_count"], 1)
+        mock_item_list.assert_called_once_with(
+            limit=20,
+            offset=0,
+            orderBy=None,
+            keyword=None,
+            ext="png",
+            tags=None,
+            folders="folder-1",
+        )
+
+    @patch("cli_anything.eagle.eagle_cli.save_presets")
+    @patch("cli_anything.eagle.eagle_cli.load_presets")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    def test_preset_import_applies_prefix(self, mock_load, _mock_save, mock_load_presets, mock_save_presets):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_load_presets.return_value = {"version": 1, "presets": {}}
+        with self.runner.isolated_filesystem():
+            with open("bundle.json", "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "kind": "eagle-cli-preset-bundle",
+                        "version": 1,
+                        "presets": {"designs": {"kind": "item-list", "params": {"keyword": "ui"}}},
+                    },
+                    handle,
+                )
+            result = self.runner.invoke(cli, ["--json", "preset", "import", "bundle.json", "--prefix", "team-"])
+            self.assertEqual(result.exit_code, 0, result.output)
+        saved = mock_save_presets.call_args.args[0]
+        self.assertIn("team-designs", saved["presets"])
+
+    @patch("cli_anything.eagle.eagle_cli.load_presets")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    def test_preset_export_writes_selected_bundle(self, mock_load, _mock_save, mock_load_presets):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_load_presets.return_value = {
+            "version": 1,
+            "presets": {
+                "designs": {"kind": "item-list", "params": {"keyword": "ui"}},
+                "review": {"kind": "bulk-update", "selector": {}, "mutation": {"add_tags": ["reviewed"]}},
+            },
+        }
+        with self.runner.isolated_filesystem():
+            result = self.runner.invoke(cli, ["--json", "preset", "export", "bundle.json", "designs"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            with open("bundle.json", "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            self.assertEqual(sorted(payload["presets"].keys()), ["designs"])
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
+    def test_item_export_writes_csv(self, mock_item_list, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_list.return_value = {"status": "success", "data": [{"id": "abc", "name": "Sample", "tags": ["ui"]}]}
+        with self.runner.isolated_filesystem():
+            result = self.runner.invoke(cli, ["--json", "item", "export", "items.csv", "--format", "csv"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            with open("items.csv", "r", encoding="utf-8") as handle:
+                content = handle.read()
+            self.assertIn("id,name,tags", content)
+            self.assertIn("abc,Sample", content)
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")

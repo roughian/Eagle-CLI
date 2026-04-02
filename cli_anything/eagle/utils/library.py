@@ -144,6 +144,129 @@ def summarize_smart_folder_rules(records: list[SmartFolderRecord]) -> dict[str, 
     }
 
 
+def translate_smart_folder_to_item_filter(record: SmartFolderRecord) -> dict[str, Any]:
+    params = {
+        "limit": 20,
+        "offset": 0,
+        "order_by": None,
+        "keyword": None,
+        "ext": None,
+        "tags": [],
+        "folders": [],
+        "folder_names": [],
+        "folder_paths": [],
+    }
+    supported_rules: list[dict[str, Any]] = []
+    unsupported_rules: list[dict[str, Any]] = []
+    conditions = record.raw.get("conditions") or []
+    if not isinstance(conditions, list):
+        conditions = []
+
+    for condition_index, condition in enumerate(conditions):
+        if not isinstance(condition, dict):
+            continue
+        boolean = str(condition.get("boolean", "TRUE")).upper()
+        match = str(condition.get("match", "AND")).upper()
+        rules = condition.get("rules") or []
+        if not isinstance(rules, list):
+            continue
+
+        if boolean != "TRUE":
+            for rule_index, rule in enumerate(rules):
+                if isinstance(rule, dict):
+                    unsupported_rules.append(
+                        {
+                            "condition_index": condition_index,
+                            "rule_index": rule_index,
+                            "property": rule.get("property"),
+                            "method": rule.get("method"),
+                            "value": rule.get("value"),
+                            "reason": f"Unsupported condition boolean: {boolean}",
+                        }
+                    )
+            continue
+
+        if match != "AND":
+            for rule_index, rule in enumerate(rules):
+                if isinstance(rule, dict):
+                    unsupported_rules.append(
+                        {
+                            "condition_index": condition_index,
+                            "rule_index": rule_index,
+                            "property": rule.get("property"),
+                            "method": rule.get("method"),
+                            "value": rule.get("value"),
+                            "reason": f"Unsupported condition match: {match}",
+                        }
+                    )
+            continue
+
+        for rule_index, rule in enumerate(rules):
+            if not isinstance(rule, dict):
+                continue
+            property_name = str(rule.get("property", "") or "")
+            method_name = str(rule.get("method", "") or "")
+            value = rule.get("value")
+            normalized_rule = {
+                "condition_index": condition_index,
+                "rule_index": rule_index,
+                "property": property_name,
+                "method": method_name,
+                "value": value,
+            }
+
+            if property_name == "type" and method_name == "equal" and isinstance(value, str) and value.strip():
+                ext_value = value.strip().lstrip(".").lower()
+                existing_ext = params["ext"]
+                if existing_ext and str(existing_ext).casefold() != ext_value.casefold():
+                    unsupported_rules.append(
+                        {
+                            **normalized_rule,
+                            "reason": f"Conflicting type rule: {existing_ext} vs {ext_value}",
+                        }
+                    )
+                    continue
+                params["ext"] = ext_value
+                supported_rules.append(normalized_rule)
+                continue
+
+            if property_name in {"folders", "folder"} and method_name == "intersection" and isinstance(value, list):
+                folder_ids = [str(item) for item in value if str(item)]
+                if not folder_ids:
+                    unsupported_rules.append({**normalized_rule, "reason": "Folder rule does not contain any IDs"})
+                    continue
+                params["folders"].extend(folder_ids)
+                supported_rules.append(normalized_rule)
+                continue
+
+            if property_name == "tags" and method_name == "intersection" and isinstance(value, list):
+                tags = [str(item) for item in value if str(item)]
+                if not tags:
+                    unsupported_rules.append({**normalized_rule, "reason": "Tag rule does not contain any tag names"})
+                    continue
+                params["tags"].extend(tags)
+                supported_rules.append(normalized_rule)
+                continue
+
+            unsupported_rules.append(
+                {
+                    **normalized_rule,
+                    "reason": f"Unsupported smart-folder rule: {property_name}/{method_name}",
+                }
+            )
+
+    params["tags"] = _unique_preserve_order(params["tags"])
+    params["folders"] = _unique_preserve_order(params["folders"])
+    return {
+        "item_filter": params,
+        "supported_rules": supported_rules,
+        "unsupported_rules": unsupported_rules,
+        "supported_rule_count": len(supported_rules),
+        "unsupported_rule_count": len(unsupported_rules),
+        "is_fully_supported": len(unsupported_rules) == 0,
+    }
+
+
 def build_library_summary(data: dict[str, Any]) -> dict[str, Any]:
     from cli_anything.eagle.utils.folders import flatten_folders
 
@@ -169,3 +292,11 @@ def build_library_summary(data: dict[str, Any]) -> dict[str, Any]:
         "smart_rule_properties": [row["property"] for row in smart_rule_summary["properties"]],
         "smart_rule_methods": [row["method"] for row in smart_rule_summary["methods"]],
     }
+
+
+def _unique_preserve_order(items: list[str]) -> list[str]:
+    seen: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.append(item)
+    return seen

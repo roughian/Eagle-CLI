@@ -1,7 +1,12 @@
 import unittest
 
 from cli_anything.eagle.utils.folders import find_folder_by_path, find_folders_by_name, flatten_folders
-from cli_anything.eagle.utils.library import find_smart_folder_by_path, flatten_smart_folders, summarize_smart_folder_rules
+from cli_anything.eagle.utils.library import (
+    find_smart_folder_by_path,
+    flatten_smart_folders,
+    summarize_smart_folder_rules,
+    translate_smart_folder_to_item_filter,
+)
 
 
 class FolderUtilsTests(unittest.TestCase):
@@ -63,6 +68,52 @@ class FolderUtilsTests(unittest.TestCase):
         self.assertEqual(summary["rule_count"], 2)
         self.assertEqual(summary["properties"][0]["property"], "type")
         self.assertEqual(summary["methods"][0]["method"], "equal")
+
+    def test_translate_smart_folder_to_item_filter_collects_supported_rules(self):
+        records = flatten_smart_folders(
+            [
+                {
+                    "id": "sf1",
+                    "name": "PNG In Folder",
+                    "children": [],
+                    "conditions": [
+                        {
+                            "boolean": "TRUE",
+                            "match": "AND",
+                            "rules": [
+                                {"property": "type", "method": "equal", "value": "png"},
+                                {"property": "folders", "method": "intersection", "value": ["root"]},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        )
+        translation = translate_smart_folder_to_item_filter(records[0])
+        self.assertTrue(translation["is_fully_supported"])
+        self.assertEqual(translation["item_filter"]["ext"], "png")
+        self.assertEqual(translation["item_filter"]["folders"], ["root"])
+
+    def test_translate_smart_folder_to_item_filter_reports_unsupported_rules(self):
+        records = flatten_smart_folders(
+            [
+                {
+                    "id": "sf1",
+                    "name": "Unsupported",
+                    "children": [],
+                    "conditions": [
+                        {
+                            "boolean": "TRUE",
+                            "match": "OR",
+                            "rules": [{"property": "type", "method": "equal", "value": "png"}],
+                        }
+                    ],
+                }
+            ]
+        )
+        translation = translate_smart_folder_to_item_filter(records[0])
+        self.assertFalse(translation["is_fully_supported"])
+        self.assertEqual(translation["unsupported_rule_count"], 1)
 
 
 if __name__ == "__main__":

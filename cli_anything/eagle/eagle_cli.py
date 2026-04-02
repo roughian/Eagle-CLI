@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ import click
 from cli_anything.eagle import __version__
 from cli_anything.eagle.core.client import DEFAULT_BASE_URL, EagleApiError, EagleClient
 from cli_anything.eagle.core.state import SessionState
-from cli_anything.eagle.core.storage import delete_preset, get_preset, load_presets, set_preset
+from cli_anything.eagle.core.storage import delete_preset, get_preset, load_presets, save_presets, set_preset
 from cli_anything.eagle.utils.folders import (
     FolderRecord,
     find_folder_by_path,
@@ -28,6 +29,7 @@ from cli_anything.eagle.utils.library import (
     flatten_smart_folders,
     smart_folder_rule_rows,
     summarize_smart_folder_rules,
+    translate_smart_folder_to_item_filter,
 )
 from cli_anything.eagle.utils.output import emit, render_folder_tree
 from cli_anything.eagle.utils.repl import start_repl
@@ -320,6 +322,68 @@ def smart_folder_audit(app: AppContext) -> None:
     _emit_and_remember(app, "smart-folder audit", {"status": "success", "data": summarize_smart_folder_rules(records)})
 
 
+@smart_folder.command("run")
+@click.option("--id", "smart_folder_id", default=None, help="Smart-folder ID.")
+@click.option("--name", "smart_folder_name", default=None, help="Exact smart-folder name.")
+@click.option("--path", "smart_folder_path", default=None, help="Exact smart-folder path.")
+@click.option("--limit", type=int, default=20, show_default=True, help="Page size used for item queries.")
+@click.option("--offset", type=int, default=0, show_default=True)
+@click.option("--order-by", default=None)
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--allow-partial", is_flag=True, help="Run even if some smart-folder rules cannot be translated.")
+@click.option("--save-preset", default=None, help="Save the translated query as an item-list preset.")
+@pass_app
+def smart_folder_run(
+    app: AppContext,
+    smart_folder_id: str | None,
+    smart_folder_name: str | None,
+    smart_folder_path: str | None,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    fetch_all: bool,
+    allow_partial: bool,
+    save_preset: str | None,
+) -> None:
+    record = _resolve_smart_folder_selector(
+        app,
+        smart_folder_id=smart_folder_id,
+        smart_folder_name=smart_folder_name,
+        smart_folder_path=smart_folder_path,
+        purpose="smart folder",
+        required=True,
+    )
+    translation = translate_smart_folder_to_item_filter(record)
+    if translation["supported_rule_count"] == 0:
+        raise click.ClickException(f"Smart folder '{record.path}' does not contain any runnable item-list rules.")
+    if translation["unsupported_rule_count"] and not allow_partial:
+        raise click.ClickException(_smart_folder_translation_error(record, translation))
+    raw_params = dict(translation["item_filter"])
+    raw_params["limit"] = limit
+    raw_params["offset"] = offset
+    raw_params["order_by"] = order_by
+    if save_preset:
+        set_preset(save_preset, {"kind": "item-list", "params": raw_params})
+    query = _query_items_from_raw_params(app, raw_params, fetch_all=fetch_all)
+    _emit_and_remember(
+        app,
+        "smart-folder run",
+        {
+            "status": "success",
+            "data": {
+                "smart_folder": _smart_folder_row(record),
+                "translation": translation,
+                "query": query["query"],
+                "pages": query["pages"],
+                "fetched_all": fetch_all,
+                "item_count": len(query["items"]),
+                "items": query["items"],
+                "saved_preset": save_preset,
+            },
+        },
+    )
+
+
 @cli.group("tag-group")
 def tag_group() -> None:
     """Tag-group inspection commands."""
@@ -401,6 +465,80 @@ def preset_delete(app: AppContext, name: str) -> None:
     if not delete_preset(name):
         raise click.ClickException(f"Unknown preset: {name}")
     _emit_and_remember(app, "preset delete", {"status": "success", "data": {"deleted": name}})
+
+
+@preset.command("export")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.argument("names", nargs=-1)
+@pass_app
+def preset_export(app: AppContext, output_file: Path, names: tuple[str, ...]) -> None:
+    stored = load_presets()
+    available = stored.get("presets", {})
+    if names:
+        missing = [name for name in names if name not in available]
+        if missing:
+            raise click.ClickException(f"Unknown preset(s): {', '.join(missing)}")
+        selected = {name: available[name] for name in names}
+    else:
+        selected = dict(available)
+    document = {
+        "kind": "eagle-cli-preset-bundle",
+        "version": 1,
+        "presets": selected,
+    }
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    _emit_and_remember(
+        app,
+        "preset export",
+        {
+            "status": "success",
+            "data": {
+                "saved_to": str(output_file),
+                "preset_count": len(selected),
+                "names": sorted(selected.keys()),
+            },
+        },
+    )
+
+
+@preset.command("import")
+@click.argument("input_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--overwrite", is_flag=True, help="Replace existing presets with the same name.")
+@click.option("--prefix", default="", help="Prefix imported preset names.")
+@pass_app
+def preset_import(app: AppContext, input_file: Path, overwrite: bool, prefix: str) -> None:
+    payload = json.loads(input_file.read_text(encoding="utf-8"))
+    incoming = _preset_bundle_presets(payload)
+    stored = load_presets()
+    existing = stored.setdefault("presets", {})
+    imported: list[str] = []
+    skipped: list[str] = []
+    renamed: list[dict[str, str]] = []
+    for name, preset_data in sorted(incoming.items()):
+        target_name = f"{prefix}{name}" if prefix else name
+        if target_name in existing and not overwrite:
+            skipped.append(target_name)
+            continue
+        existing[target_name] = preset_data
+        imported.append(target_name)
+        if target_name != name:
+            renamed.append({"from": name, "to": target_name})
+    save_presets(stored)
+    _emit_and_remember(
+        app,
+        "preset import",
+        {
+            "status": "success",
+            "data": {
+                "loaded_from": str(input_file),
+                "imported": imported,
+                "skipped": skipped,
+                "renamed": renamed,
+                "overwrite": overwrite,
+            },
+        },
+    )
 
 
 @preset.command("save-item-list")
@@ -783,10 +921,12 @@ def item() -> None:
 
 
 @item.command("list")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
 @item_filter_options
 @pass_app
 def item_list(
     app: AppContext,
+    fetch_all: bool,
     limit: int,
     offset: int,
     order_by: str | None,
@@ -797,8 +937,9 @@ def item_list(
     folder_names: tuple[str, ...],
     folder_paths: tuple[str, ...],
 ) -> None:
-    params = _build_item_filters(
+    query = _query_items(
         app,
+        fetch_all=fetch_all,
         limit=limit,
         offset=offset,
         order_by=order_by,
@@ -809,7 +950,58 @@ def item_list(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    _emit_and_remember(app, "item list", app.client.item_list(**params))
+    _emit_and_remember(app, "item list", {"status": "success", "data": query["items"]})
+
+
+@item.command("export")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--format", "export_format", type=click.Choice(["auto", "json", "jsonl", "csv"]), default="auto", show_default=True)
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_filter_options
+@pass_app
+def item_export(
+    app: AppContext,
+    output_file: Path,
+    export_format: str,
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    query = _query_items(
+        app,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_format = _write_items_export(output_file, query["items"], export_format)
+    _emit_and_remember(
+        app,
+        "item export",
+        {
+            "status": "success",
+            "data": {
+                "saved_to": str(output_file),
+                "format": resolved_format,
+                "count": len(query["items"]),
+                "pages": query["pages"],
+                "query": query["query"],
+            },
+        },
+    )
 
 
 @item.command("info")
@@ -1544,6 +1736,70 @@ def _build_item_filters_from_preset(app: AppContext, raw_params: dict[str, Any])
     }
 
 
+def _query_items(
+    app: AppContext,
+    *,
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> dict[str, Any]:
+    raw_params = _item_filter_payload_from_args(
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    return _query_items_from_raw_params(app, raw_params, fetch_all=fetch_all)
+
+
+def _query_items_from_raw_params(app: AppContext, raw_params: dict[str, Any], *, fetch_all: bool) -> dict[str, Any]:
+    params = _build_item_filters_from_preset(app, raw_params)
+    if not fetch_all:
+        response = app.client.item_list(**params)
+        return {
+            "items": list(response.get("data") or []),
+            "pages": 1,
+            "query": params,
+        }
+
+    page_size = int(raw_params.get("limit", 20) or 20)
+    current_offset = int(raw_params.get("offset", 0) or 0)
+    if page_size < 1:
+        raise click.ClickException("The item query page size must be at least 1.")
+
+    items: list[dict[str, Any]] = []
+    pages = 0
+    while True:
+        page_params = dict(params)
+        page_params["limit"] = page_size
+        page_params["offset"] = current_offset
+        response = app.client.item_list(**page_params)
+        page_items = list(response.get("data") or [])
+        items.extend(page_items)
+        pages += 1
+        if len(page_items) < page_size:
+            break
+        current_offset += page_size
+
+    return {
+        "items": items,
+        "pages": pages,
+        "query": params,
+    }
+
+
 def _bulk_update_result(
     app: AppContext,
     *,
@@ -1753,11 +2009,10 @@ def _resolve_folder_filters(
 ) -> list[str]:
     if not any([folder_ids, folder_names, folder_paths]):
         return []
+    if folder_ids and not any([folder_names, folder_paths]):
+        return _unique_preserve_order(folder_ids)
     records = _folder_records(app)
     resolved = list(folder_ids)
-    for folder_id in folder_ids:
-        if not any(record.id == folder_id for record in records):
-            raise click.ClickException(f"Unknown folder ID: {folder_id}")
     for folder_name in folder_names:
         record = _resolve_folder_record_from_records(
             records,
@@ -2108,6 +2363,14 @@ def _load_payload(*, body_json: str | None, body_file: str | None) -> dict | lis
     return None
 
 
+def _preset_bundle_presets(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, dict) and isinstance(payload.get("presets"), dict):
+        return payload["presets"]
+    if isinstance(payload, dict) and payload and all(isinstance(value, dict) for value in payload.values()):
+        return payload
+    raise click.ClickException("Preset bundle must be a JSON object with a 'presets' mapping.")
+
+
 def _load_batch_items_from_paths(
     paths: tuple[str, ...],
     manifest: str | None,
@@ -2208,6 +2471,71 @@ def _derive_name_from_url(url: str) -> str:
     parsed = urlparse(url)
     tail = Path(parsed.path).name
     return tail or parsed.netloc or "bookmark"
+
+
+def _smart_folder_translation_error(record: SmartFolderRecord, translation: dict[str, Any]) -> str:
+    reasons = [str(rule.get("reason", "unsupported rule")) for rule in translation.get("unsupported_rules", [])]
+    preview = "; ".join(reasons[:3])
+    extra = ""
+    if len(reasons) > 3:
+        extra = f" (+{len(reasons) - 3} more)"
+    return (
+        f"Smart folder '{record.path}' contains rules that cannot be translated safely. "
+        f"Use `--allow-partial` to run only the supported subset. Unsupported: {preview}{extra}"
+    )
+
+
+def _write_items_export(path: Path, items: list[dict[str, Any]], requested_format: str) -> str:
+    export_format = _infer_export_format(path, requested_format)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if export_format == "json":
+        path.write_text(json.dumps(items, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        return export_format
+    if export_format == "jsonl":
+        lines = [json.dumps(item, ensure_ascii=False, sort_keys=True) for item in items]
+        text = "\n".join(lines)
+        if lines:
+            text += "\n"
+        path.write_text(text, encoding="utf-8")
+        return export_format
+    if export_format == "csv":
+        columns = _collect_export_columns(items)
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=columns)
+            if columns:
+                writer.writeheader()
+                for item in items:
+                    writer.writerow({column: _csv_cell(item.get(column)) for column in columns})
+        return export_format
+    raise click.ClickException(f"Unsupported export format: {export_format}")
+
+
+def _infer_export_format(path: Path, requested_format: str) -> str:
+    if requested_format != "auto":
+        return requested_format
+    suffix = path.suffix.casefold()
+    if suffix == ".jsonl":
+        return "jsonl"
+    if suffix == ".csv":
+        return "csv"
+    return "json"
+
+
+def _collect_export_columns(items: list[dict[str, Any]]) -> list[str]:
+    columns: list[str] = []
+    for item in items:
+        for key in item.keys():
+            if key not in columns:
+                columns.append(key)
+    return columns
+
+
+def _csv_cell(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if value is None:
+        return ""
+    return str(value)
 
 
 def _sanitize_output(value: Any):

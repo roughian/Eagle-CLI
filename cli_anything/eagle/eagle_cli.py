@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,21 @@ from urllib.parse import urlparse
 import click
 
 from cli_anything.eagle import __version__
+from cli_anything.eagle.core.bridge import (
+    BRIDGE_PLUGIN_ID,
+    BRIDGE_PLUGIN_NAME,
+    DEFAULT_WAIT_SECONDS,
+    bridge_layout,
+    companion_plugin_template_dir,
+    default_plugin_dir_candidates,
+    ensure_bridge_dirs,
+    export_companion_plugin,
+    install_companion_plugin,
+    installed_plugin_paths,
+    load_bridge_status,
+    write_bridge_request,
+    wait_for_bridge_response,
+)
 from cli_anything.eagle.core.client import DEFAULT_BASE_URL, EagleApiError, EagleClient
 from cli_anything.eagle.core.state import SessionState
 from cli_anything.eagle.core.storage import delete_preset, get_preset, load_presets, save_presets, set_preset
@@ -419,6 +435,78 @@ def tag_group_show(app: AppContext, group_id: str | None, group_name: str | None
 
 
 @cli.group()
+def bridge() -> None:
+    """Companion plugin bridge commands."""
+
+
+@bridge.command("status")
+@pass_app
+def bridge_status(app: AppContext) -> None:
+    layout = ensure_bridge_dirs()
+    installed = [str(path) for path in installed_plugin_paths()]
+    status = load_bridge_status()
+    _emit_and_remember(
+        app,
+        "bridge status",
+        {
+            "status": "success",
+            "data": {
+                "plugin_id": BRIDGE_PLUGIN_ID,
+                "plugin_name": BRIDGE_PLUGIN_NAME,
+                "template_dir": str(companion_plugin_template_dir()),
+                "state_dir": str(layout["state_dir"]),
+                "request_dir": str(layout["requests"]),
+                "response_dir": str(layout["responses"]),
+                "processed_dir": str(layout["processed"]),
+                "installed_plugin_paths": installed,
+                "default_plugin_dirs": [str(path) for path in default_plugin_dir_candidates()],
+                "status": status,
+            },
+        },
+    )
+
+
+@bridge.command("export-plugin")
+@click.argument("output_dir", type=click.Path(file_okay=False, path_type=Path))
+@pass_app
+def bridge_export_plugin(app: AppContext, output_dir: Path) -> None:
+    exported = export_companion_plugin(output_dir)
+    _emit_and_remember(app, "bridge export-plugin", {"status": "success", "data": {"exported_to": str(exported)}})
+
+
+@bridge.command("install-plugin")
+@click.option("--plugin-dir", type=click.Path(file_okay=False, path_type=Path), default=None, help="Target Eagle plugins directory.")
+@pass_app
+def bridge_install_plugin(app: AppContext, plugin_dir: Path | None) -> None:
+    candidates = default_plugin_dir_candidates()
+    target_root = plugin_dir
+    if target_root is None:
+        target_root = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
+    installed_path = install_companion_plugin(target_root)
+    _emit_and_remember(
+        app,
+        "bridge install-plugin",
+        {
+            "status": "success",
+            "data": {
+                "installed_to": str(installed_path),
+                "plugin_root": str(target_root),
+                "plugin_id": BRIDGE_PLUGIN_ID,
+            },
+        },
+    )
+
+
+@bridge.command("ping")
+@click.option("--timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the ping request without waiting for a response.")
+@pass_app
+def bridge_ping(app: AppContext, timeout: float, queue_only: bool) -> None:
+    result = _bridge_request("ping", {"base_url": app.base_url}, timeout_seconds=timeout, queue_only=queue_only)
+    _emit_and_remember(app, "bridge ping", result)
+
+
+@cli.group()
 def preset() -> None:
     """Saved preset commands."""
 
@@ -705,6 +793,262 @@ def preset_run_bulk_update(app: AppContext, name: str, save_plan: Path | None) -
         save_plan=save_plan,
     )
     _emit_and_remember(app, f"preset run-bulk-update {name}", result)
+
+
+@cli.group()
+def snapshot() -> None:
+    """Snapshot and rollback commands."""
+
+
+@snapshot.command("create")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to snapshot.")
+@click.option("--all", "fetch_all", is_flag=True, help="Capture all matching items by paging with the current limit as page size.")
+@item_filter_options
+@pass_app
+def snapshot_create(
+    app: AppContext,
+    output_file: Path,
+    item_ids: tuple[str, ...],
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    items = _collect_target_items(
+        app,
+        item_ids=item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    document = _snapshot_document(
+        "snapshot create",
+        items,
+        context={
+            "fetch_all": fetch_all,
+            "filters": _item_filter_payload_from_args(
+                limit=limit,
+                offset=offset,
+                order_by=order_by,
+                keyword=keyword,
+                ext=ext,
+                tags=tags,
+                folders=folders,
+                folder_names=folder_names,
+                folder_paths=folder_paths,
+            ),
+            "item_ids": list(item_ids),
+        },
+    )
+    _write_snapshot(output_file, document)
+    _emit_and_remember(
+        app,
+        "snapshot create",
+        {"status": "success", "data": {**_snapshot_summary(document), "saved_to": str(output_file)}},
+    )
+
+
+@snapshot.command("show")
+@click.argument("snapshot_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@pass_app
+def snapshot_show(app: AppContext, snapshot_file: Path) -> None:
+    document = _load_snapshot(snapshot_file)
+    _emit_and_remember(
+        app,
+        "snapshot show",
+        {
+            "status": "success",
+            "data": {
+                **_snapshot_summary(document),
+                "snapshot_file": str(snapshot_file),
+                "items": document.get("items", [])[:10],
+            },
+        },
+    )
+
+
+@snapshot.command("restore")
+@click.argument("snapshot_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--restore-names", is_flag=True, help="Also restore item names through the bridge plugin.")
+@click.option("--restore-folders", is_flag=True, help="Also restore folder assignments through the bridge plugin.")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue bridge work without waiting for a response.")
+@click.option("--skip-unchanged", is_flag=True, help="Skip unchanged items when rebuilding restore operations.")
+@pass_app
+def snapshot_restore(
+    app: AppContext,
+    snapshot_file: Path,
+    restore_names: bool,
+    restore_folders: bool,
+    bridge_timeout: float,
+    queue_only: bool,
+    skip_unchanged: bool,
+) -> None:
+    document = _load_snapshot(snapshot_file)
+    snapshot_items = list(document.get("items") or [])
+    item_ids = tuple(str(item.get("id")) for item in snapshot_items if str(item.get("id")))
+    current_items = _collect_target_items(
+        app,
+        item_ids=item_ids,
+        limit=len(item_ids) or 1,
+        offset=0,
+        order_by=None,
+        keyword=None,
+        ext=None,
+        tags=(),
+        folders=(),
+        folder_names=(),
+        folder_paths=(),
+    )
+    current_by_id = {str(item.get("id")): item for item in current_items}
+
+    metadata_operations: list[dict[str, Any]] = []
+    rename_operations: list[dict[str, Any]] = []
+    move_operations: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    for snapshot_item_data in snapshot_items:
+        item_id = str(snapshot_item_data.get("id") or "")
+        if not item_id or item_id not in current_by_id:
+            skipped.append({"id": item_id, "reason": "missing"})
+            continue
+        current_item = current_by_id[item_id]
+        metadata_payload = {
+            "id": item_id,
+            "tags": list(snapshot_item_data.get("tags") or []),
+            "annotation": snapshot_item_data.get("annotation"),
+            "url": snapshot_item_data.get("url"),
+        }
+        if snapshot_item_data.get("star") is not None:
+            metadata_payload["star"] = snapshot_item_data.get("star")
+        changed_fields = _changed_item_fields(current_item, metadata_payload)
+        if changed_fields or not skip_unchanged:
+            metadata_operations.append(
+                {
+                    "method": "POST",
+                    "endpoint": "/api/item/update",
+                    "payload": metadata_payload,
+                    "changed_fields": changed_fields,
+                    "item": {"id": item_id, "name": current_item.get("name")},
+                }
+            )
+        else:
+            skipped.append({"id": item_id, "reason": "metadata-unchanged"})
+
+        if restore_names:
+            next_name = str(snapshot_item_data.get("name") or "")
+            current_name = str(current_item.get("name") or "")
+            if next_name and (next_name != current_name or not skip_unchanged):
+                if next_name != current_name:
+                    rename_operations.append({"item_id": item_id, "name": current_name, "new_name": next_name})
+
+        if restore_folders:
+            next_folders = [str(folder_id) for folder_id in snapshot_item_data.get("folders") or [] if str(folder_id)]
+            current_folders = [str(folder_id) for folder_id in current_item.get("folders") or [] if str(folder_id)]
+            if next_folders != current_folders:
+                move_operations.append(
+                    {
+                        "item_id": item_id,
+                        "name": current_item.get("name"),
+                        "current_folders": current_folders,
+                        "folder_ids": next_folders,
+                    }
+                )
+
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "snapshot restore",
+            {
+                "status": "dry-run",
+                "data": {
+                    "snapshot_file": str(snapshot_file),
+                    "metadata_operations": metadata_operations,
+                    "rename_operations": rename_operations,
+                    "move_operations": move_operations,
+                    "skipped": skipped,
+                },
+            },
+        )
+        return
+
+    metadata_results = []
+    for operation in metadata_operations:
+        payload = operation["payload"]
+        response = app.client.item_update(
+            payload["id"],
+            tags=payload.get("tags"),
+            annotation=payload.get("annotation"),
+            url=payload.get("url"),
+            star=payload.get("star"),
+        )
+        metadata_results.append({"id": payload["id"], "status": response.get("status", "success")})
+
+    bridge_results: list[dict[str, Any]] = []
+    if rename_operations:
+        bridge_results.append(
+            {
+                "action": "rename_items",
+                "result": _bridge_request(
+                    "rename_items",
+                    {"operations": rename_operations},
+                    timeout_seconds=bridge_timeout,
+                    queue_only=queue_only,
+                ),
+            }
+        )
+    if move_operations:
+        bridge_results.append(
+            {
+                "action": "move_items",
+                "result": _bridge_request(
+                    "move_items",
+                    {"operations": move_operations},
+                    timeout_seconds=bridge_timeout,
+                    queue_only=queue_only,
+                ),
+            }
+        )
+
+    _emit_and_remember(
+        app,
+        "snapshot restore",
+        {
+            "status": "success",
+            "data": {
+                "snapshot_file": str(snapshot_file),
+                "restored_metadata_count": len(metadata_results),
+                "rename_operation_count": len(rename_operations),
+                "move_operation_count": len(move_operations),
+                "skipped": skipped,
+                "bridge_results": bridge_results,
+            },
+        },
+    )
 
 
 @cli.group()
@@ -1171,6 +1515,250 @@ def item_bulk_update(
     _emit_and_remember(app, "item bulk-update", result)
 
 
+@item.command("rename-bulk")
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to rename.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--limit", type=int, default=200, show_default=True)
+@click.option("--offset", type=int, default=0, show_default=True)
+@click.option("--order-by", default=None)
+@click.option("--keyword", default=None)
+@click.option("--ext", default=None)
+@click.option("--tag", "tags", multiple=True, help="Filter by existing tags.")
+@click.option("--folder", "folders", multiple=True, help="Filter by folder IDs.")
+@click.option("--folder-name", "folder_names", multiple=True, help="Filter by exact folder names.")
+@click.option("--folder-path", "folder_paths", multiple=True, help="Filter by exact folder paths.")
+@click.option("--prefix", default="", help="Prefix to prepend to each name.")
+@click.option("--suffix", default="", help="Suffix to append to each name.")
+@click.option("--replace-from", default=None, help="Replace this exact substring before prefix/suffix are applied.")
+@click.option("--replace-to", default="", help="Replacement string for --replace-from.")
+@click.option("--strip", "strip_names", is_flag=True, help="Trim leading and trailing whitespace before applying prefix/suffix.")
+@click.option("--skip-unchanged", is_flag=True)
+@click.option("--save-snapshot", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Save a rollback snapshot before renaming.")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
+@pass_app
+def item_rename_bulk(
+    app: AppContext,
+    item_ids: tuple[str, ...],
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+    prefix: str,
+    suffix: str,
+    replace_from: str | None,
+    replace_to: str,
+    strip_names: bool,
+    skip_unchanged: bool,
+    save_snapshot: Path | None,
+    bridge_timeout: float,
+    queue_only: bool,
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    items = _collect_target_items(
+        app,
+        item_ids=item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    if save_snapshot is not None:
+        _write_snapshot(save_snapshot, _snapshot_document("item rename-bulk", items))
+    operations, skipped = _build_rename_operations(
+        items,
+        prefix=prefix,
+        suffix=suffix,
+        replace_from=replace_from,
+        replace_to=replace_to,
+        strip_names=strip_names,
+        skip_unchanged=skip_unchanged,
+    )
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "item rename-bulk",
+            {
+                "status": "dry-run",
+                "data": {
+                    "matched_count": len(items),
+                    "operation_count": len(operations),
+                    "operations": operations,
+                    "skipped": skipped,
+                    "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+                },
+            },
+        )
+        return
+    bridge_result = _bridge_request(
+        "rename_items",
+        {"operations": operations},
+        timeout_seconds=bridge_timeout,
+        queue_only=queue_only,
+    )
+    _emit_and_remember(
+        app,
+        "item rename-bulk",
+        {
+            "status": "success",
+            "data": {
+                "matched_count": len(items),
+                "operation_count": len(operations),
+                "operations": operations,
+                "skipped": skipped,
+                "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+                "bridge": bridge_result,
+            },
+        },
+    )
+
+
+@item.command("move-bulk")
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to move.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--limit", type=int, default=200, show_default=True)
+@click.option("--offset", type=int, default=0, show_default=True)
+@click.option("--order-by", default=None)
+@click.option("--keyword", default=None)
+@click.option("--ext", default=None)
+@click.option("--tag", "tags", multiple=True, help="Filter by existing tags.")
+@click.option("--folder", "folders", multiple=True, help="Filter by folder IDs.")
+@click.option("--folder-name", "folder_names", multiple=True, help="Filter by exact folder names.")
+@click.option("--folder-path", "folder_paths", multiple=True, help="Filter by exact folder paths.")
+@click.option("--target-folder-id", default=None)
+@click.option("--target-folder-name", default=None)
+@click.option("--target-folder-path", default=None)
+@click.option("--ensure-target-path", default=None, help="Create the target folder path before moving items.")
+@click.option("--skip-unchanged", is_flag=True)
+@click.option("--save-snapshot", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Save a rollback snapshot before moving.")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
+@pass_app
+def item_move_bulk(
+    app: AppContext,
+    item_ids: tuple[str, ...],
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+    target_folder_id: str | None,
+    target_folder_name: str | None,
+    target_folder_path: str | None,
+    ensure_target_path: str | None,
+    skip_unchanged: bool,
+    save_snapshot: Path | None,
+    bridge_timeout: float,
+    queue_only: bool,
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    items = _collect_target_items(
+        app,
+        item_ids=item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    if save_snapshot is not None:
+        _write_snapshot(save_snapshot, _snapshot_document("item move-bulk", items))
+    ensure_result, folder = _resolve_move_target(
+        app,
+        target_folder_id=target_folder_id,
+        target_folder_name=target_folder_name,
+        target_folder_path=target_folder_path,
+        ensure_target_path=ensure_target_path,
+    )
+    operations, skipped = _build_move_operations(
+        items,
+        target_folder_id=folder.id if folder is not None else "",
+        target_folder_path=folder.path if folder is not None else "",
+        skip_unchanged=skip_unchanged,
+    )
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "item move-bulk",
+            {
+                "status": "dry-run",
+                "data": {
+                    "matched_count": len(items),
+                    "operation_count": len(operations),
+                    "target_folder": _folder_row(folder) if folder is not None else None,
+                    "ensure_result": ensure_result,
+                    "operations": operations,
+                    "skipped": skipped,
+                    "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+                },
+            },
+        )
+        return
+    bridge_result = _bridge_request(
+        "move_items",
+        {"operations": operations},
+        timeout_seconds=bridge_timeout,
+        queue_only=queue_only,
+    )
+    _emit_and_remember(
+        app,
+        "item move-bulk",
+        {
+            "status": "success",
+            "data": {
+                "matched_count": len(items),
+                "operation_count": len(operations),
+                "target_folder": _folder_row(folder) if folder is not None else None,
+                "ensure_result": ensure_result,
+                "operations": operations,
+                "skipped": skipped,
+                "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+                "bridge": bridge_result,
+            },
+        },
+    )
+
+
 @item.command("add-path")
 @click.argument("path", type=click.Path(exists=True, dir_okay=False))
 @click.option("--name", default=None, help="Defaults to the file stem.")
@@ -1566,6 +2154,366 @@ def item_refresh_thumbnail(app: AppContext, item_id: str) -> None:
         endpoint="/api/item/refreshThumbnail",
         payload={"id": item_id},
         action=lambda: app.client.item_refresh_thumbnail(item_id),
+    )
+
+
+@cli.group()
+def audit() -> None:
+    """Duplicate and cleanup analysis commands."""
+
+
+@audit.command("duplicates")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--mode", "modes", multiple=True, type=click.Choice(["name", "url", "name-size", "name-ext"]), help="Repeatable duplicate strategy.")
+@click.option("--top", type=click.IntRange(1, None), default=10, show_default=True)
+@click.option("--save-report", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@item_filter_options
+@pass_app
+def audit_duplicates(
+    app: AppContext,
+    fetch_all: bool,
+    modes: tuple[str, ...],
+    top: int,
+    save_report: Path | None,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=(),
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    query = _query_items(
+        app,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    report = _build_duplicate_report(query["items"], modes=modes or ("name", "url", "name-size"), top=top)
+    report["query"] = query["query"]
+    report["pages"] = query["pages"]
+    if save_report is not None:
+        _write_manifest(save_report, report)
+    _emit_and_remember(
+        app,
+        "audit duplicates",
+        {
+            "status": "success",
+            "data": {
+                **report,
+                "saved_report": str(save_report) if save_report is not None else None,
+            },
+        },
+    )
+
+
+@audit.command("cleanup")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--sample-limit", type=click.IntRange(1, None), default=10, show_default=True)
+@click.option("--save-report", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@item_filter_options
+@pass_app
+def audit_cleanup(
+    app: AppContext,
+    fetch_all: bool,
+    sample_limit: int,
+    save_report: Path | None,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=(),
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    query = _query_items(
+        app,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    report = _build_cleanup_report(query["items"], sample_limit=sample_limit)
+    report["query"] = query["query"]
+    report["pages"] = query["pages"]
+    if save_report is not None:
+        _write_manifest(save_report, report)
+    _emit_and_remember(
+        app,
+        "audit cleanup",
+        {
+            "status": "success",
+            "data": {
+                **report,
+                "saved_report": str(save_report) if save_report is not None else None,
+            },
+        },
+    )
+
+
+@cli.group()
+def organize() -> None:
+    """Higher-level organization workflows."""
+
+
+@organize.command("apply")
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to organize.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--limit", type=int, default=200, show_default=True)
+@click.option("--offset", type=int, default=0, show_default=True)
+@click.option("--order-by", default=None)
+@click.option("--keyword", default=None)
+@click.option("--ext", default=None)
+@click.option("--tag", "tags", multiple=True, help="Filter by existing tags.")
+@click.option("--folder", "folders", multiple=True, help="Filter by folder IDs.")
+@click.option("--folder-name", "folder_names", multiple=True, help="Filter by exact folder names.")
+@click.option("--folder-path", "folder_paths", multiple=True, help="Filter by exact folder paths.")
+@click.option("--set-tag", "set_tags", multiple=True)
+@click.option("--add-tag", "add_tags", multiple=True)
+@click.option("--annotation", default=None)
+@click.option("--url", "source_url", default=None)
+@click.option("--star", type=click.IntRange(0, 5), default=None)
+@click.option("--target-folder-id", default=None)
+@click.option("--target-folder-name", default=None)
+@click.option("--target-folder-path", default=None)
+@click.option("--ensure-target-path", default=None)
+@click.option("--name-prefix", default="")
+@click.option("--name-suffix", default="")
+@click.option("--replace-from", default=None)
+@click.option("--replace-to", default="")
+@click.option("--strip", "strip_names", is_flag=True)
+@click.option("--skip-unchanged", is_flag=True)
+@click.option("--save-snapshot", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--save-matches", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--save-plan", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue bridge work without waiting for Eagle to process it.")
+@pass_app
+def organize_apply(
+    app: AppContext,
+    item_ids: tuple[str, ...],
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+    set_tags: tuple[str, ...],
+    add_tags: tuple[str, ...],
+    annotation: str | None,
+    source_url: str | None,
+    star: int | None,
+    target_folder_id: str | None,
+    target_folder_name: str | None,
+    target_folder_path: str | None,
+    ensure_target_path: str | None,
+    name_prefix: str,
+    name_suffix: str,
+    replace_from: str | None,
+    replace_to: str,
+    strip_names: bool,
+    skip_unchanged: bool,
+    save_snapshot: Path | None,
+    save_matches: Path | None,
+    save_plan: Path | None,
+    bridge_timeout: float,
+    queue_only: bool,
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    items = _collect_target_items(
+        app,
+        item_ids=item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    if save_snapshot is not None:
+        _write_snapshot(save_snapshot, _snapshot_document("organize apply", items))
+
+    metadata_requested = any([set_tags, add_tags, annotation is not None, source_url is not None, star is not None])
+    rename_requested = any([name_prefix, name_suffix, replace_from is not None, strip_names])
+    move_requested = any([target_folder_id, target_folder_name, target_folder_path, ensure_target_path])
+
+    metadata_result = None
+    if metadata_requested:
+        metadata_result = _bulk_update_result(
+            app,
+            item_ids=tuple(str(item.get("id")) for item in items if str(item.get("id"))),
+            limit=len(items) or 1,
+            offset=0,
+            order_by=None,
+            keyword=None,
+            ext=None,
+            tags=(),
+            folders=(),
+            folder_names=(),
+            folder_paths=(),
+            set_tags=set_tags,
+            add_tags=add_tags,
+            annotation=annotation,
+            source_url=source_url,
+            star=star,
+            max_items=None,
+            require_match=None,
+            skip_unchanged=skip_unchanged,
+            save_matches=save_matches,
+            save_plan=save_plan,
+        )
+
+    ensure_result = None
+    target_folder = None
+    move_operations: list[dict[str, Any]] = []
+    move_skipped: list[dict[str, Any]] = []
+    if move_requested:
+        ensure_result, target_folder = _resolve_move_target(
+            app,
+            target_folder_id=target_folder_id,
+            target_folder_name=target_folder_name,
+            target_folder_path=target_folder_path,
+            ensure_target_path=ensure_target_path,
+        )
+        move_operations, move_skipped = _build_move_operations(
+            items,
+            target_folder_id=target_folder.id if target_folder is not None else "",
+            target_folder_path=target_folder.path if target_folder is not None else "",
+            skip_unchanged=skip_unchanged,
+        )
+
+    rename_operations: list[dict[str, Any]] = []
+    rename_skipped: list[dict[str, Any]] = []
+    if rename_requested:
+        rename_operations, rename_skipped = _build_rename_operations(
+            items,
+            prefix=name_prefix,
+            suffix=name_suffix,
+            replace_from=replace_from,
+            replace_to=replace_to,
+            strip_names=strip_names,
+            skip_unchanged=skip_unchanged,
+        )
+
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "organize apply",
+            {
+                "status": "dry-run",
+                "data": {
+                    "matched_count": len(items),
+                    "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+                    "metadata": metadata_result,
+                    "target_folder": _folder_row(target_folder) if target_folder is not None else None,
+                    "ensure_result": ensure_result,
+                    "move_operations": move_operations,
+                    "move_skipped": move_skipped,
+                    "rename_operations": rename_operations,
+                    "rename_skipped": rename_skipped,
+                },
+            },
+        )
+        return
+
+    bridge_results: list[dict[str, Any]] = []
+    if rename_operations:
+        bridge_results.append(
+            {
+                "action": "rename_items",
+                "result": _bridge_request(
+                    "rename_items",
+                    {"operations": rename_operations},
+                    timeout_seconds=bridge_timeout,
+                    queue_only=queue_only,
+                ),
+            }
+        )
+    if move_operations:
+        bridge_results.append(
+            {
+                "action": "move_items",
+                "result": _bridge_request(
+                    "move_items",
+                    {"operations": move_operations},
+                    timeout_seconds=bridge_timeout,
+                    queue_only=queue_only,
+                ),
+            }
+        )
+
+    _emit_and_remember(
+        app,
+        "organize apply",
+        {
+            "status": "success",
+            "data": {
+                "matched_count": len(items),
+                "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+                "metadata": metadata_result,
+                "target_folder": _folder_row(target_folder) if target_folder is not None else None,
+                "ensure_result": ensure_result,
+                "move_operation_count": len(move_operations),
+                "move_skipped": move_skipped,
+                "rename_operation_count": len(rename_operations),
+                "rename_skipped": rename_skipped,
+                "bridge_results": bridge_results,
+            },
+        },
     )
 
 
@@ -2068,10 +3016,326 @@ def _changed_item_fields(item: dict[str, Any], payload: dict[str, Any]) -> list[
     return changed
 
 
+def _validate_item_selector_request(
+    *,
+    item_ids: tuple[str, ...],
+    fetch_all: bool,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    if item_ids and any([keyword, ext, tags, folders, folder_names, folder_paths]):
+        raise click.ClickException("Use either explicit --item-id values or filters, not both.")
+    if not item_ids and not fetch_all and not any([keyword, ext, tags, folders, folder_names, folder_paths]):
+        raise click.ClickException("Provide explicit --item-id values, at least one filter, or --all.")
+
+
+def _snapshot_document(command_name: str, items: list[dict[str, Any]], *, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "kind": "eagle-cli-snapshot",
+        "version": 1,
+        "created_at": _utc_now(),
+        "command": command_name,
+        "context": context or {},
+        "items": [_snapshot_item(item) for item in items],
+    }
+
+
+def _snapshot_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item.get("id"),
+        "name": item.get("name"),
+        "tags": list(item.get("tags") or []),
+        "annotation": item.get("annotation"),
+        "url": item.get("url"),
+        "star": item.get("star"),
+        "folders": list(item.get("folders") or []),
+        "ext": item.get("ext"),
+        "size": item.get("size"),
+        "isDeleted": item.get("isDeleted"),
+    }
+
+
+def _write_snapshot(path: Path, document: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _load_snapshot(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("kind") != "eagle-cli-snapshot":
+        raise click.ClickException("Snapshot file is not an eagle-cli-snapshot document.")
+    return payload
+
+
+def _snapshot_summary(document: dict[str, Any]) -> dict[str, Any]:
+    items = list(document.get("items") or [])
+    return {
+        "kind": document.get("kind"),
+        "version": document.get("version"),
+        "created_at": document.get("created_at"),
+        "command": document.get("command"),
+        "item_count": len(items),
+        "sample_ids": [item.get("id") for item in items[:5]],
+    }
+
+
+def _bridge_request(
+    action: str,
+    payload: dict[str, Any],
+    *,
+    timeout_seconds: float,
+    queue_only: bool,
+) -> dict[str, Any]:
+    request = write_bridge_request(action, payload)
+    if queue_only:
+        return {
+            "status": "queued",
+            "data": {
+                "request_id": request["request_id"],
+                "request_path": str(request["request_path"]),
+                "response_path": str(request["response_path"]),
+                "action": action,
+            },
+        }
+
+    response = wait_for_bridge_response(request["request_id"], timeout_seconds=timeout_seconds)
+    if response is None:
+        status = load_bridge_status()
+        detail = ""
+        if status is not None:
+            detail = f" Last bridge heartbeat: {status.get('updatedAt', 'unknown')}."
+        raise click.ClickException(
+            f"Timed out waiting for the Eagle bridge plugin to process '{action}'. "
+            f"Use `bridge status` and `bridge install-plugin` if needed.{detail}"
+        )
+    if response.get("status") == "error":
+        raise click.ClickException(f"Bridge request '{action}' failed: {response.get('error', 'unknown error')}")
+    return {
+        "status": "success",
+        "data": {
+            "request_id": request["request_id"],
+            "response": response,
+        },
+    }
+
+
+def _build_rename_operations(
+    items: list[dict[str, Any]],
+    *,
+    prefix: str,
+    suffix: str,
+    replace_from: str | None,
+    replace_to: str | None,
+    strip_names: bool,
+    skip_unchanged: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not any([prefix, suffix, replace_from is not None, strip_names]):
+        raise click.ClickException("Provide at least one rename transform such as --prefix, --suffix, --replace-from, or --strip.")
+    operations: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for item in items:
+        current_name = str(item.get("name") or "")
+        next_name = current_name
+        if replace_from is not None:
+            next_name = next_name.replace(replace_from, replace_to or "")
+        if strip_names:
+            next_name = next_name.strip()
+        next_name = f"{prefix}{next_name}{suffix}"
+        if not next_name:
+            skipped.append({"id": item.get("id"), "name": current_name, "reason": "empty-result"})
+            continue
+        if next_name == current_name and skip_unchanged:
+            skipped.append({"id": item.get("id"), "name": current_name, "reason": "unchanged"})
+            continue
+        if next_name == current_name:
+            skipped.append({"id": item.get("id"), "name": current_name, "reason": "unchanged"})
+            continue
+        operations.append(
+            {
+                "item_id": item.get("id"),
+                "name": current_name,
+                "new_name": next_name,
+            }
+        )
+    return operations, skipped
+
+
+def _build_move_operations(
+    items: list[dict[str, Any]],
+    *,
+    target_folder_id: str,
+    target_folder_path: str,
+    skip_unchanged: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    operations: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for item in items:
+        current_folders = [str(folder_id) for folder_id in item.get("folders") or [] if str(folder_id)]
+        if current_folders == [target_folder_id] and skip_unchanged:
+            skipped.append(
+                {
+                    "id": item.get("id"),
+                    "name": item.get("name"),
+                    "reason": "already-in-target-folder",
+                }
+            )
+            continue
+        if current_folders == [target_folder_id]:
+            skipped.append(
+                {
+                    "id": item.get("id"),
+                    "name": item.get("name"),
+                    "reason": "already-in-target-folder",
+                }
+            )
+            continue
+        operations.append(
+            {
+                "item_id": item.get("id"),
+                "name": item.get("name"),
+                "current_folders": current_folders,
+                "folder_ids": [target_folder_id],
+                "target_folder_path": target_folder_path,
+            }
+        )
+    return operations, skipped
+
+
+def _minimal_item_row(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item.get("id"),
+        "name": item.get("name"),
+        "ext": item.get("ext"),
+        "size": item.get("size"),
+        "folders": item.get("folders") or [],
+        "tags": item.get("tags") or [],
+        "url": item.get("url"),
+    }
+
+
+def _build_duplicate_report(items: list[dict[str, Any]], *, modes: tuple[str, ...], top: int) -> dict[str, Any]:
+    report: dict[str, Any] = {"total_items": len(items), "modes": []}
+    for mode in modes:
+        buckets: dict[str, list[dict[str, Any]]] = {}
+        for item in items:
+            key = _duplicate_key(item, mode)
+            if key is None:
+                continue
+            buckets.setdefault(key, []).append(item)
+        groups = [
+            {
+                "key": key,
+                "count": len(group_items),
+                "items": [_minimal_item_row(item) for item in group_items[:top]],
+            }
+            for key, group_items in buckets.items()
+            if len(group_items) > 1
+        ]
+        groups.sort(key=lambda row: (-row["count"], row["key"]))
+        report["modes"].append(
+            {
+                "mode": mode,
+                "group_count": len(groups),
+                "groups": groups[:top],
+            }
+        )
+    return report
+
+
+def _duplicate_key(item: dict[str, Any], mode: str) -> str | None:
+    name = str(item.get("name") or "").strip()
+    url = str(item.get("url") or "").strip()
+    ext = str(item.get("ext") or "").strip().lower()
+    size = item.get("size")
+    if mode == "name":
+        return name or None
+    if mode == "url":
+        return url or None
+    if mode == "name-size":
+        if not name or size in (None, ""):
+            return None
+        return f"{name}|{size}"
+    if mode == "name-ext":
+        if not name or not ext:
+            return None
+        return f"{name}|{ext}"
+    raise click.ClickException(f"Unsupported duplicate mode: {mode}")
+
+
+def _build_cleanup_report(items: list[dict[str, Any]], *, sample_limit: int) -> dict[str, Any]:
+    untagged = [_minimal_item_row(item) for item in items if not list(item.get("tags") or [])]
+    unfiled = [_minimal_item_row(item) for item in items if not list(item.get("folders") or [])]
+    missing_annotation = [_minimal_item_row(item) for item in items if not str(item.get("annotation") or "").strip()]
+    missing_url = [_minimal_item_row(item) for item in items if not str(item.get("url") or "").strip()]
+    deleted = [_minimal_item_row(item) for item in items if bool(item.get("isDeleted"))]
+    return {
+        "total_items": len(items),
+        "counts": {
+            "untagged": len(untagged),
+            "unfiled": len(unfiled),
+            "missing_annotation": len(missing_annotation),
+            "missing_url": len(missing_url),
+            "deleted": len(deleted),
+        },
+        "samples": {
+            "untagged": untagged[:sample_limit],
+            "unfiled": unfiled[:sample_limit],
+            "missing_annotation": missing_annotation[:sample_limit],
+            "missing_url": missing_url[:sample_limit],
+            "deleted": deleted[:sample_limit],
+        },
+    }
+
+
+def _resolve_move_target(
+    app: AppContext,
+    *,
+    target_folder_id: str | None,
+    target_folder_name: str | None,
+    target_folder_path: str | None,
+    ensure_target_path: str | None,
+) -> tuple[dict[str, Any], FolderRecord | None]:
+    selectors = [value for value in [target_folder_id, target_folder_name, target_folder_path, ensure_target_path] if value]
+    if len(selectors) != 1:
+        raise click.ClickException("Use exactly one move target selector: --target-folder-id, --target-folder-name, --target-folder-path, or --ensure-target-path.")
+    if ensure_target_path:
+        ensure_result = _ensure_folder_path(app, ensure_target_path)
+        folder = FolderRecord(
+            id=str(ensure_result["data"].get("leaf_id") or ""),
+            name=normalize_folder_path(ensure_result["data"].get("leaf_path") or "").split("/")[-1],
+            path=str(ensure_result["data"].get("leaf_path") or ""),
+            depth=str(ensure_result["data"].get("leaf_path") or "").count("/"),
+            parent_id=None,
+            parent_path=None,
+            raw={},
+        )
+        return ensure_result, folder
+    folder = _resolve_folder_selector(
+        app,
+        folder_id=target_folder_id,
+        folder_name=target_folder_name,
+        folder_path=target_folder_path,
+        purpose="target folder",
+        required=True,
+    )
+    return {"status": "success", "data": {"leaf_id": folder.id, "leaf_path": folder.path}}, folder
+
+
+def _utc_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _collect_target_items(
     app: AppContext,
     *,
     item_ids: tuple[str, ...],
+    fetch_all: bool = False,
     limit: int,
     offset: int,
     order_by: str | None,
@@ -2084,8 +3348,9 @@ def _collect_target_items(
 ) -> list[dict[str, Any]]:
     if item_ids:
         return [app.client.item_info(item_id)["data"] for item_id in item_ids]
-    filters = _build_item_filters(
+    query = _query_items(
         app,
+        fetch_all=fetch_all,
         limit=limit,
         offset=offset,
         order_by=order_by,
@@ -2096,7 +3361,7 @@ def _collect_target_items(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    return list(app.client.item_list(**filters)["data"])
+    return list(query["items"])
 
 
 def _resolve_folder_filters(

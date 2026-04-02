@@ -1,10 +1,12 @@
 # CLI-Anything Eagle
 
-`cli-anything-eagle` is a broad command-line interface for the Eagle desktop app.
-It targets Eagle's local HTTP API and exposes practical commands for app info,
-library management, folder workflows, smart-folder rule inspection, item
-ingestion, bulk edits, reusable presets, preset bundles, item export, operation
-plans, query stats, and low-level escape hatches.
+`cli-anything-eagle` is a broad command-line interface for the Eagle desktop
+app. It targets Eagle's local HTTP API and exposes practical commands for app
+info, library management, folder workflows, smart-folder rule inspection, item
+ingestion, bulk edits, reusable presets, preset bundles, item export,
+operation plans, query stats, rollback snapshots, duplicate and cleanup audits,
+high-level organize flows, and a companion bridge plugin for name and folder
+operations that are not available through the local HTTP API alone.
 
 ## Requirements
 
@@ -52,6 +54,8 @@ cli-anything-eagle smart-folder run --name "Camera JPG"
 cli-anything-eagle folder tree
 cli-anything-eagle folder find Reference
 cli-anything-eagle --json item list --limit 10 --tag reference
+cli-anything-eagle --json audit duplicates --all --top 5
+cli-anything-eagle --json bridge status
 ```
 
 ## Useful Workflows
@@ -182,6 +186,41 @@ cli-anything-eagle --dry-run item bulk-update \
   --skip-unchanged
 ```
 
+Create rollback snapshots before bigger changes:
+
+```bash
+cli-anything-eagle snapshot create ./snapshots/ui.json --folder-path "Design/UI/References"
+cli-anything-eagle snapshot show ./snapshots/ui.json
+cli-anything-eagle --dry-run snapshot restore ./snapshots/ui.json
+```
+
+Rename or move many items with the companion bridge plugin:
+
+```bash
+cli-anything-eagle bridge install-plugin
+cli-anything-eagle --json bridge status
+cli-anything-eagle --dry-run item rename-bulk --folder-name References --prefix archived-
+cli-anything-eagle --dry-run item move-bulk --tag reviewed --target-folder-path "Archive/Reviewed"
+```
+
+Audit duplicate candidates and cleanup hotspots:
+
+```bash
+cli-anything-eagle --json audit duplicates --all --mode name --mode url --top 20
+cli-anything-eagle --json audit cleanup --all --sample-limit 10
+```
+
+Run a higher-level organize workflow in one command:
+
+```bash
+cli-anything-eagle --dry-run organize apply \
+  --folder-path "Design/UI/References" \
+  --add-tag reviewed \
+  --name-prefix ui- \
+  --ensure-target-path "Archive/UI Reviewed" \
+  --save-snapshot ./snapshots/ui-reviewed.json
+```
+
 Export mutation plans and apply them later:
 
 ```bash
@@ -202,10 +241,14 @@ cli-anything-eagle plan apply ./plans/reviewed.json
 - `smart-folder list`, `tree`, `show`, `rules`, `audit`, `run`
 - `tag-group list`, `show`
 - `folder list`, `tree`, `find`, `recent`, `create`, `ensure`, `ensure-path`, `rename`, `update`
-- `item list`, `export`, `stats`, `info`, `thumbnail`, `update`, `bulk-update`
+- `item list`, `export`, `stats`, `info`, `thumbnail`, `update`, `bulk-update`, `rename-bulk`, `move-bulk`
 - `item add-path`, `add-paths`, `add-dir`, `add-url`, `add-urls`, `add-bookmark`
 - `item trash`, `refresh-palette`, `refresh-thumbnail`
 - `preset list`, `show`, `delete`, `export`, `import`, `save-item-list`, `run-item-list`, `save-bulk-update`, `run-bulk-update`
+- `snapshot create`, `show`, `restore`
+- `audit duplicates`, `cleanup`
+- `organize apply`
+- `bridge status`, `export-plugin`, `install-plugin`, `ping`
 - `plan show`, `save-last`, `apply`
 - `raw request`
 
@@ -223,5 +266,13 @@ cli-anything-eagle plan apply ./plans/reviewed.json
   explicitly pass `--allow-partial`.
 - `item bulk-update` can now enforce safety boundaries with `--max-items`,
   `--require-match`, `--skip-unchanged`, and `--save-matches`.
+- `snapshot` files are plain JSON documents, so you can archive them with your
+  own backups or review them before any restore.
+- `item rename-bulk`, `item move-bulk`, and `organize apply` rely on the
+  companion bridge plugin when names or folder assignments must change through
+  Eagle's Plugin API instead of the local HTTP API.
+- `bridge install-plugin` copies the bundled service plugin into Eagle's plugin
+  directory. If Eagle is already open, restart it once so the background bridge
+  can start.
 - Mutating commands support `--dry-run`, which is useful when sharing the CLI
   with other Eagle users who want to preview changes first.

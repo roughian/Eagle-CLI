@@ -140,6 +140,64 @@ class EagleCliTests(unittest.TestCase):
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    def test_snapshot_create_writes_document(self, mock_item_info, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_info.return_value = {
+            "status": "success",
+            "data": {"id": "abc", "name": "Sample", "tags": ["ui"], "annotation": "", "url": "", "folders": ["f1"]},
+        }
+        with self.runner.isolated_filesystem():
+            result = self.runner.invoke(cli, ["--json", "snapshot", "create", "snap.json", "--item-id", "abc"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            with open("snap.json", "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            self.assertEqual(payload["kind"], "eagle-cli-snapshot")
+            self.assertEqual(payload["items"][0]["id"], "abc")
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    def test_snapshot_restore_dry_run_includes_bridge_ops(self, mock_item_info, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_info.return_value = {
+            "status": "success",
+            "data": {"id": "abc", "name": "Current", "tags": [], "annotation": "", "url": "", "folders": ["old-folder"]},
+        }
+        with self.runner.isolated_filesystem():
+            with open("snap.json", "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "kind": "eagle-cli-snapshot",
+                        "version": 1,
+                        "items": [
+                            {
+                                "id": "abc",
+                                "name": "Saved",
+                                "tags": ["ui"],
+                                "annotation": "",
+                                "url": "",
+                                "folders": ["new-folder"],
+                            }
+                        ],
+                    },
+                    handle,
+                )
+            result = self.runner.invoke(
+                cli,
+                ["--json", "--dry-run", "snapshot", "restore", "snap.json", "--restore-names", "--restore-folders"],
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(len(payload["data"]["rename_operations"]), 1)
+            self.assertEqual(len(payload["data"]["move_operations"]), 1)
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
     @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
     def test_folder_ensure_path_dry_run_plans_creation(self, mock_folder_list, mock_load, _mock_save):
         from cli_anything.eagle.core.state import SessionState
@@ -206,13 +264,152 @@ class EagleCliTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(result.exit_code, 0, result.output)
-            payload = json.loads(result.output)
-            self.assertEqual(payload["data"]["matched_count"], 1)
-            self.assertEqual(payload["data"]["operation_count"], 0)
-            self.assertEqual(len(payload["data"]["skipped_unchanged"]), 1)
             with open("matches.json", "r", encoding="utf-8") as handle:
                 matches = json.load(handle)
-            self.assertEqual(matches[0]["id"], "abc")
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["matched_count"], 1)
+        self.assertEqual(payload["data"]["operation_count"], 0)
+        self.assertEqual(len(payload["data"]["skipped_unchanged"]), 1)
+        self.assertEqual(matches[0]["id"], "abc")
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    def test_item_rename_bulk_dry_run_builds_bridge_operations(self, mock_item_info, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_info.return_value = {"status": "success", "data": {"id": "abc", "name": "Sample"}}
+        result = self.runner.invoke(
+            cli,
+            ["--json", "--dry-run", "item", "rename-bulk", "--item-id", "abc", "--prefix", "new-"],
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["operations"][0]["new_name"], "new-Sample")
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
+    def test_item_move_bulk_dry_run_resolves_target_folder(self, mock_folder_list, mock_item_info, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_info.return_value = {"status": "success", "data": {"id": "abc", "name": "Sample", "folders": []}}
+        mock_folder_list.return_value = {
+            "status": "success",
+            "data": [{"id": "root", "name": "Root", "children": [{"id": "child", "name": "Child", "children": []}]}],
+        }
+        result = self.runner.invoke(
+            cli,
+            ["--json", "--dry-run", "item", "move-bulk", "--item-id", "abc", "--target-folder-path", "Root/Child"],
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["operations"][0]["folder_ids"], ["child"])
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
+    def test_audit_duplicates_groups_items(self, mock_item_list, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_list.return_value = {
+            "status": "success",
+            "data": [
+                {"id": "a", "name": "Same", "url": "", "ext": "png", "size": 10},
+                {"id": "b", "name": "Same", "url": "", "ext": "png", "size": 10},
+            ],
+        }
+        result = self.runner.invoke(cli, ["--json", "audit", "duplicates", "--keyword", "same"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["modes"][0]["group_count"], 1)
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
+    def test_audit_cleanup_counts_missing_fields(self, mock_item_list, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_list.return_value = {
+            "status": "success",
+            "data": [
+                {"id": "a", "name": "Alpha", "tags": [], "annotation": "", "url": "", "folders": []},
+                {"id": "b", "name": "Beta", "tags": ["ref"], "annotation": "ok", "url": "https://example.com", "folders": ["f1"]},
+            ],
+        }
+        result = self.runner.invoke(cli, ["--json", "audit", "cleanup", "--keyword", "alpha"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["counts"]["untagged"], 1)
+        self.assertEqual(payload["data"]["counts"]["unfiled"], 1)
+        self.assertEqual(payload["data"]["counts"]["missing_url"], 1)
+        self.assertEqual(payload["data"]["counts"]["missing_annotation"], 1)
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    def test_organize_apply_dry_run_combines_metadata_move_and_rename(
+        self, mock_item_info, mock_folder_list, mock_load, _mock_save
+    ):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_info.return_value = {
+            "status": "success",
+            "data": {"id": "abc", "name": "Sample", "tags": [], "annotation": "", "url": "", "folders": ["root"]},
+        }
+        mock_folder_list.return_value = {
+            "status": "success",
+            "data": [{"id": "root", "name": "Root", "children": [{"id": "child", "name": "Child", "children": []}]}],
+        }
+        with self.runner.isolated_filesystem():
+            result = self.runner.invoke(
+                cli,
+                [
+                    "--json",
+                    "--dry-run",
+                    "organize",
+                    "apply",
+                    "--item-id",
+                    "abc",
+                    "--add-tag",
+                    "reviewed",
+                    "--name-prefix",
+                    "ui-",
+                    "--target-folder-path",
+                    "Root/Child",
+                    "--save-snapshot",
+                    "organize-snapshot.json",
+                ],
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+            with open("organize-snapshot.json", "r", encoding="utf-8") as handle:
+                self.assertTrue(handle.read())
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["metadata"]["status"], "dry-run")
+        self.assertEqual(payload["data"]["metadata"]["data"]["operation_count"], 1)
+        self.assertEqual(len(payload["data"]["move_operations"]), 1)
+        self.assertEqual(len(payload["data"]["rename_operations"]), 1)
+        self.assertEqual(payload["data"]["saved_snapshot"], "organize-snapshot.json")
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    def test_bridge_export_plugin_writes_manifest(self, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        with self.runner.isolated_filesystem():
+            result = self.runner.invoke(cli, ["--json", "bridge", "export-plugin", "plugin-copy"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            with open("plugin-copy/manifest.json", "r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            self.assertEqual(manifest["name"], "CLI-Anything Eagle Bridge")
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")

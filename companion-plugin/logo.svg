@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-label="CLI-Anything Eagle Bridge">
+  <rect width="96" height="96" rx="20" fill="#0f172a"/>
+  <rect x="12" y="12" width="72" height="72" rx="16" fill="#1e293b" stroke="#38bdf8" stroke-width="3"/>
+  <path d="M26 33h16v6H26zm0 12h28v6H26zm0 12h22v6H26z" fill="#e2e8f0"/>
+  <path d="M58 29l12 19-12 19h8l12-19-12-19z" fill="#38bdf8"/>
+</svg>

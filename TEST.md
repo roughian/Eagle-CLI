@@ -11,6 +11,8 @@
 - Validate smart-folder translation, preset bundle import/export, and item
   export pagination.
 - Validate item stats summaries and bulk-update safety rails.
+- Validate rollback snapshots, duplicate audits, bridge plugin export, and
+  higher-level organize planning.
 - Run a small live smoke check separately against read-only endpoints only.
 
 ## Commands
@@ -31,6 +33,15 @@ python3 -m cli_anything.eagle.eagle_cli --json item stats --all --limit 2 --keyw
 python3 -m cli_anything.eagle.eagle_cli --json preset export ./presets.json
 python3 -m cli_anything.eagle.eagle_cli --json preset import ./presets.json --prefix imported-
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run item bulk-update --keyword ui --add-tag reviewed --max-items 10 --save-matches ./matches.json
+python3 -m cli_anything.eagle.eagle_cli --json snapshot create ./snapshot.json --item-id EXAMPLE
+python3 -m cli_anything.eagle.eagle_cli --json snapshot show ./snapshot.json
+python3 -m cli_anything.eagle.eagle_cli --json --dry-run snapshot restore ./snapshot.json
+python3 -m cli_anything.eagle.eagle_cli --json audit duplicates --all --top 5
+python3 -m cli_anything.eagle.eagle_cli --json audit cleanup --all --sample-limit 5
+python3 -m cli_anything.eagle.eagle_cli --json bridge export-plugin ./bridge-plugin
+python3 -m cli_anything.eagle.eagle_cli item rename-bulk --help
+python3 -m cli_anything.eagle.eagle_cli item move-bulk --help
+python3 -m cli_anything.eagle.eagle_cli organize apply --help
 python3 -m cli_anything.eagle.eagle_cli preset --help
 python3 -m cli_anything.eagle.eagle_cli smart-folder --help
 python3 -m cli_anything.eagle.eagle_cli plan --help
@@ -38,23 +49,36 @@ python3 -m cli_anything.eagle.eagle_cli plan --help
 
 ## Result
 
-- `python3 -m unittest discover -s tests -v` passed with 34 tests.
+- `python3 -m unittest discover -s tests -v` passed with 42 tests.
 - Live smoke checks passed for:
   - `cli-anything-eagle --json doctor`
   - `cli-anything-eagle --json app info`
   - `cli-anything-eagle --json library summary`
+  - `cli-anything-eagle --json bridge status`
   - `cli-anything-eagle --json smart-folder audit`
   - `cli-anything-eagle --json smart-folder rules --name "대화 jpg"`
   - `cli-anything-eagle --json smart-folder run --name "대화 jpg"`
   - `cli-anything-eagle --json item list --limit 2`
+  - `cli-anything-eagle --json snapshot create <tmp>/snapshot.json --item-id <id>`
+  - `cli-anything-eagle --json snapshot show <tmp>/snapshot.json`
+  - `cli-anything-eagle --json --dry-run snapshot restore <tmp>/snapshot.json`
   - `cli-anything-eagle --json --dry-run item add-dir <tmp> --recursive --ext png`
+  - `cli-anything-eagle --json --dry-run item rename-bulk --item-id <id> --prefix archived-`
+  - `cli-anything-eagle --json --dry-run item move-bulk --item-id <id> --target-folder-path <path>`
   - `cli-anything-eagle --json item export <tmp>/items.jsonl --all --limit 2 --keyword ui`
   - `cli-anything-eagle --json item stats --all --limit 2 --keyword ui`
+  - `cli-anything-eagle --json audit duplicates --all --top 5`
+  - `cli-anything-eagle --json audit cleanup --all --sample-limit 5`
   - `cli-anything-eagle --json preset export <tmp>/presets.json`
   - `cli-anything-eagle --json preset import <tmp>/presets.json --prefix imported-`
   - `cli-anything-eagle --json --dry-run item bulk-update --keyword ui --add-tag reviewed --max-items 10 --save-matches <tmp>/matches.json`
+  - `cli-anything-eagle --json --dry-run organize apply --item-id <id> --add-tag reviewed --name-prefix ui-`
+  - `cli-anything-eagle --json bridge export-plugin <tmp>/bridge-plugin`
   - `cli-anything-eagle --dry-run item bulk-update --keyword ui --add-tag reviewed --max-items 1` correctly failed
   - `cli-anything-eagle --json --dry-run preset run-bulk-update review-ui`
+  - `cli-anything-eagle item rename-bulk --help`
+  - `cli-anything-eagle item move-bulk --help`
+  - `cli-anything-eagle organize apply --help`
   - `cli-anything-eagle preset --help`
   - `cli-anything-eagle smart-folder --help`
   - `cli-anything-eagle plan --help`

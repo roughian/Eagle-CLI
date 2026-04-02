@@ -698,6 +698,10 @@ def preset_run_bulk_update(app: AppContext, name: str, save_plan: Path | None) -
         annotation=mutation.get("annotation"),
         source_url=mutation.get("source_url"),
         star=mutation.get("star"),
+        max_items=None,
+        require_match=None,
+        skip_unchanged=False,
+        save_matches=None,
         save_plan=save_plan,
     )
     _emit_and_remember(app, f"preset run-bulk-update {name}", result)
@@ -1004,6 +1008,45 @@ def item_export(
     )
 
 
+@item.command("stats")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--top", type=click.IntRange(1, None), default=10, show_default=True, help="Maximum number of rows to show for grouped counts.")
+@item_filter_options
+@pass_app
+def item_stats(
+    app: AppContext,
+    fetch_all: bool,
+    top: int,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    query = _query_items(
+        app,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    summary = _summarize_items(app, query["items"], top=top)
+    summary["pages"] = query["pages"]
+    summary["query"] = query["query"]
+    summary["fetched_all"] = fetch_all
+    _emit_and_remember(app, "item stats", {"status": "success", "data": summary})
+
+
 @item.command("info")
 @click.argument("item_id")
 @pass_app
@@ -1073,6 +1116,10 @@ def item_update(
 @click.option("--annotation", default=None, help="Set annotation on each matched item.")
 @click.option("--url", "source_url", default=None, help="Set source URL on each matched item.")
 @click.option("--star", type=click.IntRange(0, 5), default=None, help="Set star rating on each matched item.")
+@click.option("--max-items", type=click.IntRange(1, None), default=None, help="Refuse to continue if more than this many items match.")
+@click.option("--require-match", type=click.IntRange(1, None), default=None, help="Require at least this many matched items.")
+@click.option("--skip-unchanged", is_flag=True, help="Skip items whose payload would not change any tracked fields.")
+@click.option("--save-matches", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write matched items to a file before applying updates.")
 @click.option("--save-plan", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write the generated operation plan to a JSON file.")
 @pass_app
 def item_bulk_update(
@@ -1092,6 +1139,10 @@ def item_bulk_update(
     annotation: str | None,
     source_url: str | None,
     star: int | None,
+    max_items: int | None,
+    require_match: int | None,
+    skip_unchanged: bool,
+    save_matches: Path | None,
     save_plan: Path | None,
 ) -> None:
     result = _bulk_update_result(
@@ -1111,6 +1162,10 @@ def item_bulk_update(
         annotation=annotation,
         source_url=source_url,
         star=star,
+        max_items=max_items,
+        require_match=require_match,
+        skip_unchanged=skip_unchanged,
+        save_matches=save_matches,
         save_plan=save_plan,
     )
     _emit_and_remember(app, "item bulk-update", result)
@@ -1818,6 +1873,10 @@ def _bulk_update_result(
     annotation: str | None,
     source_url: str | None,
     star: int | None,
+    max_items: int | None,
+    require_match: int | None,
+    skip_unchanged: bool,
+    save_matches: Path | None,
     save_plan: Path | None,
 ) -> dict[str, Any]:
     _validate_bulk_update_request(
@@ -1848,7 +1907,16 @@ def _bulk_update_result(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
+    matched_count = len(source_items)
+    if require_match is not None and matched_count < require_match:
+        raise click.ClickException(f"Matched {matched_count} item(s), which is below the required minimum of {require_match}.")
+    if max_items is not None and matched_count > max_items:
+        raise click.ClickException(f"Matched {matched_count} item(s), which exceeds --max-items {max_items}.")
+    if save_matches is not None:
+        _write_items_export(save_matches, source_items, "auto")
+
     operations: list[dict[str, Any]] = []
+    skipped_unchanged: list[dict[str, Any]] = []
     for item in source_items:
         next_tags = list(set_tags) if set_tags else None
         if add_tags:
@@ -1867,6 +1935,15 @@ def _bulk_update_result(
             payload["url"] = source_url
         if star is not None:
             payload["star"] = star
+        changed_fields = _changed_item_fields(item, payload)
+        if skip_unchanged and not changed_fields:
+            skipped_unchanged.append(
+                {
+                    "id": item.get("id"),
+                    "name": item.get("name"),
+                }
+            )
+            continue
         operations.append(
             {
                 "method": "POST",
@@ -1877,6 +1954,7 @@ def _bulk_update_result(
                 },
                 "endpoint": "/api/item/update",
                 "payload": payload,
+                "changed_fields": changed_fields,
                 "description": f"Update item {item.get('id')} ({item.get('name')})",
             }
         )
@@ -1888,7 +1966,9 @@ def _bulk_update_result(
                 "item bulk-update",
                 operations,
                 context={
-                    "matched_count": len(operations),
+                    "matched_count": matched_count,
+                    "operation_count": len(operations),
+                    "skipped_unchanged_count": len(skipped_unchanged),
                     "filters": _item_filter_payload_from_args(
                         limit=limit,
                         offset=offset,
@@ -1909,8 +1989,11 @@ def _bulk_update_result(
         return {
             "status": "dry-run",
             "data": {
-                "matched_count": len(operations),
+                "matched_count": matched_count,
+                "operation_count": len(operations),
+                "skipped_unchanged": skipped_unchanged,
                 "operations": operations,
+                "saved_matches": str(save_matches) if save_matches is not None else None,
                 "saved_plan": str(save_plan) if save_plan is not None else None,
             },
         }
@@ -1937,10 +2020,13 @@ def _bulk_update_result(
     return {
         "status": "success",
         "data": {
-            "matched_count": len(operations),
+            "matched_count": matched_count,
+            "operation_count": len(operations),
             "updated_count": len(results),
+            "skipped_unchanged": skipped_unchanged,
             "items": results,
             "operations": operations,
+            "saved_matches": str(save_matches) if save_matches is not None else None,
             "saved_plan": str(save_plan) if save_plan is not None else None,
         },
     }
@@ -1967,6 +2053,19 @@ def _validate_bulk_update_request(
         raise click.ClickException("Use either explicit --item-id values or filters, not both.")
     if not item_ids and not any([keyword, ext, tags, folders, folder_names, folder_paths]):
         raise click.ClickException("Refusing to bulk-update without item IDs or at least one filter.")
+
+
+def _changed_item_fields(item: dict[str, Any], payload: dict[str, Any]) -> list[str]:
+    changed: list[str] = []
+    if "tags" in payload and list(item.get("tags") or []) != list(payload.get("tags") or []):
+        changed.append("tags")
+    if "annotation" in payload and str(item.get("annotation") or "") != str(payload.get("annotation") or ""):
+        changed.append("annotation")
+    if "url" in payload and str(item.get("url") or "") != str(payload.get("url") or ""):
+        changed.append("url")
+    if "star" in payload and item.get("star") != payload.get("star"):
+        changed.append("star")
+    return changed
 
 
 def _collect_target_items(
@@ -2508,6 +2607,70 @@ def _write_items_export(path: Path, items: list[dict[str, Any]], requested_forma
                     writer.writerow({column: _csv_cell(item.get(column)) for column in columns})
         return export_format
     raise click.ClickException(f"Unsupported export format: {export_format}")
+
+
+def _summarize_items(app: AppContext, items: list[dict[str, Any]], *, top: int) -> dict[str, Any]:
+    from collections import Counter
+
+    ext_counts: Counter[str] = Counter()
+    tag_counts: Counter[str] = Counter()
+    folder_counts: Counter[str] = Counter()
+    star_counts: Counter[str] = Counter()
+    folder_path_lookup = {record.id: record.path for record in _folder_records(app)}
+
+    tagged_items = 0
+    untagged_items = 0
+    annotated_items = 0
+    sourced_items = 0
+    deleted_items = 0
+    multi_folder_items = 0
+
+    for item in items:
+        ext_value = str(item.get("ext") or "").lower()
+        if ext_value:
+            ext_counts[ext_value] += 1
+
+        tags = [str(tag) for tag in item.get("tags") or [] if str(tag)]
+        if tags:
+            tagged_items += 1
+            for tag in tags:
+                tag_counts[tag] += 1
+        else:
+            untagged_items += 1
+
+        folders = [str(folder_id) for folder_id in item.get("folders") or [] if str(folder_id)]
+        if len(folders) > 1:
+            multi_folder_items += 1
+        for folder_id in folders:
+            folder_counts[folder_id] += 1
+
+        if str(item.get("annotation") or "").strip():
+            annotated_items += 1
+        if str(item.get("url") or "").strip():
+            sourced_items += 1
+        if bool(item.get("isDeleted")):
+            deleted_items += 1
+
+        star_value = item.get("star")
+        if star_value is not None:
+            star_counts[str(star_value)] += 1
+
+    return {
+        "total_items": len(items),
+        "tagged_items": tagged_items,
+        "untagged_items": untagged_items,
+        "annotated_items": annotated_items,
+        "with_source_url": sourced_items,
+        "deleted_items": deleted_items,
+        "multi_folder_items": multi_folder_items,
+        "extensions": [{"ext": key, "count": value} for key, value in ext_counts.most_common(top)],
+        "tags": [{"tag": key, "count": value} for key, value in tag_counts.most_common(top)],
+        "folders": [
+            {"folder_id": key, "folder_path": folder_path_lookup.get(key, ""), "count": value}
+            for key, value in folder_counts.most_common(top)
+        ],
+        "stars": [{"star": key, "count": value} for key, value in star_counts.most_common(top)],
+    }
 
 
 def _infer_export_format(path: Path, requested_format: str) -> str:

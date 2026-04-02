@@ -179,6 +179,88 @@ class EagleCliTests(unittest.TestCase):
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    def test_item_bulk_update_skip_unchanged_can_save_matches(self, mock_item_info, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_info.return_value = {
+            "status": "success",
+            "data": {"id": "abc", "name": "Sample", "tags": ["old"], "annotation": "", "url": ""},
+        }
+        with self.runner.isolated_filesystem():
+            result = self.runner.invoke(
+                cli,
+                [
+                    "--json",
+                    "--dry-run",
+                    "item",
+                    "bulk-update",
+                    "--item-id",
+                    "abc",
+                    "--add-tag",
+                    "old",
+                    "--skip-unchanged",
+                    "--save-matches",
+                    "matches.json",
+                ],
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["data"]["matched_count"], 1)
+            self.assertEqual(payload["data"]["operation_count"], 0)
+            self.assertEqual(len(payload["data"]["skipped_unchanged"]), 1)
+            with open("matches.json", "r", encoding="utf-8") as handle:
+                matches = json.load(handle)
+            self.assertEqual(matches[0]["id"], "abc")
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
+    def test_item_bulk_update_rejects_over_max_items(self, mock_item_list, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_list.return_value = {
+            "status": "success",
+            "data": [{"id": "a", "name": "One"}, {"id": "b", "name": "Two"}],
+        }
+        result = self.runner.invoke(
+            cli,
+            ["item", "bulk-update", "--keyword", "ui", "--add-tag", "reviewed", "--max-items", "1"],
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("exceeds --max-items 1", result.output)
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
+    def test_item_stats_summarizes_counts(self, mock_item_list, mock_folder_list, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_folder_list.return_value = {
+            "status": "success",
+            "data": [{"id": "root", "name": "Root", "children": [{"id": "child", "name": "Child", "children": []}]}],
+        }
+        mock_item_list.return_value = {
+            "status": "success",
+            "data": [
+                {"id": "a", "ext": "png", "tags": ["ui"], "folders": ["child"], "annotation": "note", "url": "https://x"},
+                {"id": "b", "ext": "png", "tags": [], "folders": ["child"], "annotation": "", "url": ""},
+            ],
+        }
+        result = self.runner.invoke(cli, ["--json", "item", "stats"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["total_items"], 2)
+        self.assertEqual(payload["data"]["tagged_items"], 1)
+        self.assertEqual(payload["data"]["extensions"][0]["ext"], "png")
+        self.assertEqual(payload["data"]["folders"][0]["folder_path"], "Root/Child")
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
     @patch("cli_anything.eagle.eagle_cli.EagleClient.library_info")
     def test_library_summary_reports_rule_stats(self, mock_library_info, mock_load, _mock_save):
         from cli_anything.eagle.core.state import SessionState

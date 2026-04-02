@@ -160,6 +160,44 @@ class EagleCliTests(unittest.TestCase):
         self.assertEqual(payload["data"]["matched_count"], 1)
         self.assertEqual(payload["data"]["operations"][0]["payload"]["tags"], ["old", "new"])
 
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.library_info")
+    def test_library_summary_reports_rule_stats(self, mock_library_info, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_library_info.return_value = {
+            "status": "success",
+            "data": {
+                "applicationVersion": "4.0.0",
+                "library": {"name": "Demo", "path": "/tmp/demo.library"},
+                "folders": [{"id": "root", "name": "Root", "children": []}],
+                "smartFolders": [
+                    {
+                        "id": "sf1",
+                        "name": "PNG Only",
+                        "children": [],
+                        "conditions": [
+                            {
+                                "boolean": "TRUE",
+                                "match": "AND",
+                                "rules": [{"property": "type", "method": "equal", "value": "png"}],
+                            }
+                        ],
+                    }
+                ],
+                "quickAccess": [],
+                "tagsGroups": [],
+            },
+        }
+        result = self.runner.invoke(cli, ["--json", "library", "summary"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["library_name"], "Demo")
+        self.assertEqual(payload["data"]["smart_rule_count"], 1)
+        self.assertEqual(payload["data"]["smart_rule_properties"], ["type"])
+
     @patch("cli_anything.eagle.eagle_cli.set_preset")
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
@@ -224,6 +262,97 @@ class EagleCliTests(unittest.TestCase):
             tags="ui",
             folders="child",
         )
+
+    @patch("cli_anything.eagle.eagle_cli.get_preset")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
+    def test_preset_run_bulk_update_builds_dry_run_operations(self, mock_item_list, mock_load, _mock_save, mock_get_preset):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_get_preset.return_value = {
+            "kind": "bulk-update",
+            "selector": {
+                "item_ids": [],
+                "limit": 50,
+                "offset": 0,
+                "order_by": None,
+                "keyword": "ui",
+                "ext": None,
+                "tags": [],
+                "folders": [],
+                "folder_names": [],
+                "folder_paths": [],
+            },
+            "mutation": {"set_tags": [], "add_tags": ["reviewed"], "annotation": None, "source_url": None, "star": None},
+        }
+        mock_item_list.return_value = {"status": "success", "data": [{"id": "abc", "name": "Sample", "tags": ["old"]}]}
+        result = self.runner.invoke(cli, ["--json", "--dry-run", "preset", "run-bulk-update", "review-ui"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["status"], "dry-run")
+        self.assertEqual(payload["data"]["matched_count"], 1)
+        self.assertEqual(payload["data"]["operations"][0]["payload"]["tags"], ["old", "reviewed"])
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    def test_item_add_dir_dry_run_writes_manifest(self, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        with self.runner.isolated_filesystem():
+            import os
+
+            os.makedirs("assets/nested", exist_ok=True)
+            with open("assets/a.png", "w", encoding="utf-8") as handle:
+                handle.write("demo")
+            with open("assets/nested/b.jpg", "w", encoding="utf-8") as handle:
+                handle.write("demo")
+            result = self.runner.invoke(
+                cli,
+                ["--json", "--dry-run", "item", "add-dir", "assets", "--recursive", "--ext", "png", "--save-manifest", "manifest.json"],
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["status"], "dry-run")
+            self.assertEqual(len(payload["data"]["payload"]["items"]), 1)
+            with open("manifest.json", "r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            self.assertEqual(manifest["kind"], "eagle-cli-add-paths-manifest")
+            self.assertEqual(len(manifest["items"]), 1)
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.library_info")
+    def test_smart_folder_rules_normalize_conditions(self, mock_library_info, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_library_info.return_value = {
+            "status": "success",
+            "data": {
+                "smartFolders": [
+                    {
+                        "id": "sf1",
+                        "name": "Images",
+                        "children": [],
+                        "conditions": [
+                            {
+                                "boolean": "TRUE",
+                                "match": "AND",
+                                "rules": [{"property": "type", "method": "equal", "value": "png"}],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+        result = self.runner.invoke(cli, ["--json", "smart-folder", "rules", "--name", "Images"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"][0]["property"], "type")
+        self.assertEqual(payload["data"][0]["method"], "equal")
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")

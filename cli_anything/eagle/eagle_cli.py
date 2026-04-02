@@ -20,6 +20,15 @@ from cli_anything.eagle.utils.folders import (
     flatten_folders,
     normalize_folder_path,
 )
+from cli_anything.eagle.utils.library import (
+    SmartFolderRecord,
+    build_library_summary,
+    find_smart_folder_by_path,
+    find_smart_folders_by_name,
+    flatten_smart_folders,
+    smart_folder_rule_rows,
+    summarize_smart_folder_rules,
+)
 from cli_anything.eagle.utils.output import emit, render_folder_tree
 from cli_anything.eagle.utils.repl import start_repl
 
@@ -183,6 +192,168 @@ def library_icon(app: AppContext, library_path: str, download: Path | None) -> N
     _emit_and_remember(app, "library icon", {"status": "success", "data": {"url": app.client.library_icon_url(library_path)}})
 
 
+@library.command("summary")
+@pass_app
+def library_summary(app: AppContext) -> None:
+    info = _library_info_data(app)
+    _emit_and_remember(app, "library summary", {"status": "success", "data": build_library_summary(info)})
+
+
+@library.command("quick-access")
+@pass_app
+def library_quick_access(app: AppContext) -> None:
+    info = _library_info_data(app)
+    entries = info.get("quickAccess") or []
+    if app.json_output:
+        _emit_and_remember(app, "library quick-access", {"status": "success", "data": entries})
+        return
+    rows = []
+    for index, entry in enumerate(entries):
+        if isinstance(entry, dict):
+            rows.append(
+                {
+                    "index": index,
+                    "id": entry.get("id", ""),
+                    "name": entry.get("name", ""),
+                    "type": entry.get("vstype") or entry.get("type", ""),
+                    "description": entry.get("description", ""),
+                }
+            )
+        else:
+            rows.append({"index": index, "value": entry})
+    _emit_and_remember(app, "library quick-access", {"status": "success", "data": rows})
+
+
+@cli.group("smart-folder")
+def smart_folder() -> None:
+    """Smart folder inspection commands."""
+
+
+@smart_folder.command("list")
+@click.option("--flat", is_flag=True, help="Show a flattened list with smart-folder paths.")
+@pass_app
+def smart_folder_list(app: AppContext, flat: bool) -> None:
+    info = _library_info_data(app)
+    data = info.get("smartFolders") or []
+    if flat or not app.json_output:
+        rows = [_smart_folder_row(record) for record in _smart_folder_records_from_data(data)]
+        _emit_and_remember(app, "smart-folder list", {"status": "success", "data": rows})
+        return
+    _emit_and_remember(app, "smart-folder list", {"status": "success", "data": data})
+
+
+@smart_folder.command("tree")
+@pass_app
+def smart_folder_tree(app: AppContext) -> None:
+    data = _library_info_data(app).get("smartFolders") or []
+    sanitized = _sanitize_output({"status": "success", "data": data})
+    app.state.record("smart-folder tree", sanitized)
+    app.state.save()
+    if app.json_output:
+        emit(sanitized, json_output=True)
+        return
+    click.echo(render_folder_tree(data))
+
+
+@smart_folder.command("show")
+@click.option("--id", "smart_folder_id", default=None, help="Smart-folder ID.")
+@click.option("--name", "smart_folder_name", default=None, help="Exact smart-folder name.")
+@click.option("--path", "smart_folder_path", default=None, help="Exact smart-folder path.")
+@pass_app
+def smart_folder_show(
+    app: AppContext,
+    smart_folder_id: str | None,
+    smart_folder_name: str | None,
+    smart_folder_path: str | None,
+) -> None:
+    record = _resolve_smart_folder_selector(
+        app,
+        smart_folder_id=smart_folder_id,
+        smart_folder_name=smart_folder_name,
+        smart_folder_path=smart_folder_path,
+        purpose="smart folder",
+        required=True,
+    )
+    _emit_and_remember(
+        app,
+        "smart-folder show",
+        {
+            "status": "success",
+            "data": {
+                **_smart_folder_row(record),
+                "raw": record.raw,
+            },
+        },
+    )
+
+
+@smart_folder.command("rules")
+@click.option("--id", "smart_folder_id", default=None, help="Smart-folder ID.")
+@click.option("--name", "smart_folder_name", default=None, help="Exact smart-folder name.")
+@click.option("--path", "smart_folder_path", default=None, help="Exact smart-folder path.")
+@pass_app
+def smart_folder_rules(
+    app: AppContext,
+    smart_folder_id: str | None,
+    smart_folder_name: str | None,
+    smart_folder_path: str | None,
+) -> None:
+    if any([smart_folder_id, smart_folder_name, smart_folder_path]):
+        record = _resolve_smart_folder_selector(
+            app,
+            smart_folder_id=smart_folder_id,
+            smart_folder_name=smart_folder_name,
+            smart_folder_path=smart_folder_path,
+            purpose="smart folder",
+            required=True,
+        )
+        records = [record]
+    else:
+        records = _smart_folder_records(app)
+    _emit_and_remember(app, "smart-folder rules", {"status": "success", "data": smart_folder_rule_rows(records)})
+
+
+@smart_folder.command("audit")
+@pass_app
+def smart_folder_audit(app: AppContext) -> None:
+    records = _smart_folder_records(app)
+    _emit_and_remember(app, "smart-folder audit", {"status": "success", "data": summarize_smart_folder_rules(records)})
+
+
+@cli.group("tag-group")
+def tag_group() -> None:
+    """Tag-group inspection commands."""
+
+
+@tag_group.command("list")
+@pass_app
+def tag_group_list(app: AppContext) -> None:
+    groups = _tag_groups(app)
+    if app.json_output:
+        _emit_and_remember(app, "tag-group list", {"status": "success", "data": groups})
+        return
+    rows = [
+        {
+            "id": group.get("id", ""),
+            "name": group.get("name", ""),
+            "color": group.get("color", ""),
+            "tag_count": len(group.get("tags") or []),
+            "description": group.get("description", ""),
+        }
+        for group in groups
+    ]
+    _emit_and_remember(app, "tag-group list", {"status": "success", "data": rows})
+
+
+@tag_group.command("show")
+@click.option("--id", "group_id", default=None, help="Tag-group ID.")
+@click.option("--name", "group_name", default=None, help="Exact tag-group name.")
+@pass_app
+def tag_group_show(app: AppContext, group_id: str | None, group_name: str | None) -> None:
+    group = _resolve_tag_group(app, group_id=group_id, group_name=group_name)
+    _emit_and_remember(app, "tag-group show", {"status": "success", "data": group})
+
+
 @cli.group()
 def preset() -> None:
     """Saved preset commands."""
@@ -195,13 +366,19 @@ def preset_list(app: AppContext) -> None:
     rows = []
     for name, preset_data in sorted(data.get("presets", {}).items()):
         params = preset_data.get("params", {})
+        selector = preset_data.get("selector", {})
+        mutation = preset_data.get("mutation", {})
+        folders = params.get("folder_paths", []) or params.get("folder_names", []) or params.get("folders", [])
+        if preset_data.get("kind") == "bulk-update":
+            folders = selector.get("folder_paths", []) or selector.get("folder_names", []) or selector.get("folders", [])
         rows.append(
             {
                 "name": name,
                 "kind": preset_data.get("kind", ""),
-                "keyword": params.get("keyword", ""),
-                "tags": params.get("tags", []),
-                "folders": params.get("folder_paths", []) or params.get("folder_names", []) or params.get("folders", []),
+                "keyword": params.get("keyword", "") or selector.get("keyword", ""),
+                "tags": params.get("tags", []) or selector.get("tags", []),
+                "folders": folders,
+                "mutation": [key for key, value in mutation.items() if value not in (None, [], ())],
             }
         )
     _emit_and_remember(app, "preset list", {"status": "success", "data": rows})
@@ -273,6 +450,119 @@ def preset_run_item_list(app: AppContext, name: str) -> None:
         raise click.ClickException(f"Preset '{name}' is not an item-list preset.")
     params = _build_item_filters_from_preset(app, preset_data.get("params", {}))
     _emit_and_remember(app, f"preset run-item-list {name}", app.client.item_list(**params))
+
+
+@preset.command("save-bulk-update")
+@click.argument("name")
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to update.")
+@click.option("--limit", type=int, default=200, show_default=True)
+@click.option("--offset", type=int, default=0, show_default=True)
+@click.option("--order-by", default=None)
+@click.option("--keyword", default=None)
+@click.option("--ext", default=None)
+@click.option("--tag", "tags", multiple=True, help="Filter by existing tags.")
+@click.option("--folder", "folders", multiple=True, help="Filter by folder IDs.")
+@click.option("--folder-name", "folder_names", multiple=True, help="Filter by exact folder names.")
+@click.option("--folder-path", "folder_paths", multiple=True, help="Filter by exact folder paths.")
+@click.option("--set-tag", "set_tags", multiple=True, help="Replace tags with this exact set.")
+@click.option("--add-tag", "add_tags", multiple=True, help="Append tags without removing existing ones.")
+@click.option("--annotation", default=None, help="Set annotation on each matched item.")
+@click.option("--url", "source_url", default=None, help="Set source URL on each matched item.")
+@click.option("--star", type=click.IntRange(0, 5), default=None, help="Set star rating on each matched item.")
+@pass_app
+def preset_save_bulk_update(
+    app: AppContext,
+    name: str,
+    item_ids: tuple[str, ...],
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+    set_tags: tuple[str, ...],
+    add_tags: tuple[str, ...],
+    annotation: str | None,
+    source_url: str | None,
+    star: int | None,
+) -> None:
+    _validate_bulk_update_request(
+        item_ids=item_ids,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+        set_tags=set_tags,
+        add_tags=add_tags,
+        annotation=annotation,
+        source_url=source_url,
+        star=star,
+    )
+    preset_data = {
+        "kind": "bulk-update",
+        "selector": {
+            "item_ids": list(item_ids),
+            **_item_filter_payload_from_args(
+                limit=limit,
+                offset=offset,
+                order_by=order_by,
+                keyword=keyword,
+                ext=ext,
+                tags=tags,
+                folders=folders,
+                folder_names=folder_names,
+                folder_paths=folder_paths,
+            ),
+        },
+        "mutation": {
+            "set_tags": list(set_tags),
+            "add_tags": list(add_tags),
+            "annotation": annotation,
+            "source_url": source_url,
+            "star": star,
+        },
+    }
+    set_preset(name, preset_data)
+    _emit_and_remember(app, "preset save-bulk-update", {"status": "success", "data": {"name": name, **preset_data}})
+
+
+@preset.command("run-bulk-update")
+@click.argument("name")
+@click.option("--save-plan", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write the generated operation plan to a JSON file.")
+@pass_app
+def preset_run_bulk_update(app: AppContext, name: str, save_plan: Path | None) -> None:
+    preset_data = get_preset(name)
+    if preset_data is None:
+        raise click.ClickException(f"Unknown preset: {name}")
+    if preset_data.get("kind") != "bulk-update":
+        raise click.ClickException(f"Preset '{name}' is not a bulk-update preset.")
+    selector = preset_data.get("selector", {})
+    mutation = preset_data.get("mutation", {})
+    result = _bulk_update_result(
+        app,
+        item_ids=tuple(selector.get("item_ids") or []),
+        limit=selector.get("limit", 200),
+        offset=selector.get("offset", 0),
+        order_by=selector.get("order_by"),
+        keyword=selector.get("keyword"),
+        ext=selector.get("ext"),
+        tags=tuple(selector.get("tags") or []),
+        folders=tuple(selector.get("folders") or []),
+        folder_names=tuple(selector.get("folder_names") or []),
+        folder_paths=tuple(selector.get("folder_paths") or []),
+        set_tags=tuple(mutation.get("set_tags") or []),
+        add_tags=tuple(mutation.get("add_tags") or []),
+        annotation=mutation.get("annotation"),
+        source_url=mutation.get("source_url"),
+        star=mutation.get("star"),
+        save_plan=save_plan,
+    )
+    _emit_and_remember(app, f"preset run-bulk-update {name}", result)
 
 
 @cli.group()
@@ -612,16 +902,7 @@ def item_bulk_update(
     star: int | None,
     save_plan: Path | None,
 ) -> None:
-    if not any([set_tags, add_tags, annotation is not None, source_url is not None, star is not None]):
-        raise click.ClickException("Provide at least one mutation field such as --set-tag, --add-tag, --annotation, --url, or --star.")
-
-    if item_ids and any([keyword, ext, tags, folders, folder_names, folder_paths]):
-        raise click.ClickException("Use either explicit --item-id values or filters, not both.")
-
-    if not item_ids and not any([keyword, ext, tags, folders, folder_names, folder_paths]):
-        raise click.ClickException("Refusing to bulk-update without item IDs or at least one filter.")
-
-    source_items = _collect_target_items(
+    result = _bulk_update_result(
         app,
         item_ids=item_ids,
         limit=limit,
@@ -633,111 +914,14 @@ def item_bulk_update(
         folders=folders,
         folder_names=folder_names,
         folder_paths=folder_paths,
+        set_tags=set_tags,
+        add_tags=add_tags,
+        annotation=annotation,
+        source_url=source_url,
+        star=star,
+        save_plan=save_plan,
     )
-    operations: list[dict[str, Any]] = []
-    for item in source_items:
-        next_tags = list(set_tags) if set_tags else None
-        if add_tags:
-            current_tags = list(item.get("tags") or [])
-            for tag in add_tags:
-                if tag not in current_tags:
-                    current_tags.append(tag)
-            next_tags = current_tags
-
-        payload: dict[str, Any] = {"id": item["id"]}
-        if next_tags is not None:
-            payload["tags"] = next_tags
-        if annotation is not None:
-            payload["annotation"] = annotation
-        if source_url is not None:
-            payload["url"] = source_url
-        if star is not None:
-            payload["star"] = star
-        operations.append(
-            {
-                "method": "POST",
-                "item": {
-                    "id": item.get("id"),
-                    "name": item.get("name"),
-                    "existing_tags": item.get("tags") or [],
-                },
-                "endpoint": "/api/item/update",
-                "payload": payload,
-                "description": f"Update item {item.get('id')} ({item.get('name')})",
-            }
-        )
-
-    if save_plan is not None:
-        _write_plan(
-            save_plan,
-            _plan_document(
-                "item bulk-update",
-                operations,
-                context={
-                    "matched_count": len(operations),
-                    "filters": _item_filter_payload_from_args(
-                        limit=limit,
-                        offset=offset,
-                        order_by=order_by,
-                        keyword=keyword,
-                        ext=ext,
-                        tags=tags,
-                        folders=folders,
-                        folder_names=folder_names,
-                        folder_paths=folder_paths,
-                    ),
-                },
-            ),
-        )
-
-    if app.dry_run:
-        _emit_and_remember(
-            app,
-            "item bulk-update",
-            {
-                "status": "dry-run",
-                "data": {
-                    "matched_count": len(operations),
-                    "operations": operations,
-                    "saved_plan": str(save_plan) if save_plan is not None else None,
-                },
-            },
-        )
-        return
-
-    results = []
-    for operation in operations:
-        payload = operation["payload"]
-        response = app.client.item_update(
-            payload["id"],
-            tags=payload.get("tags"),
-            annotation=payload.get("annotation"),
-            url=payload.get("url"),
-            star=payload.get("star"),
-        )
-        results.append(
-            {
-                "id": payload["id"],
-                "name": operation["item"]["name"],
-                "updated_fields": sorted([key for key in payload.keys() if key != "id"]),
-                "response": response.get("status", "success"),
-            }
-        )
-
-    _emit_and_remember(
-        app,
-        "item bulk-update",
-        {
-            "status": "success",
-            "data": {
-                "matched_count": len(operations),
-                "updated_count": len(results),
-                "items": results,
-                "operations": operations,
-                "saved_plan": str(save_plan) if save_plan is not None else None,
-            },
-        },
-    )
+    _emit_and_remember(app, "item bulk-update", result)
 
 
 @item.command("add-path")
@@ -836,6 +1020,94 @@ def item_add_paths(
         payload=payload,
         action=lambda: app.client.item_add_from_paths(items, folder_id=target_folder.id if target_folder else None),
         resolved={"folder": _folder_row(target_folder) if target_folder else None},
+    )
+
+
+@item.command("add-dir")
+@click.argument("directory", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--recursive", is_flag=True, help="Walk subdirectories recursively.")
+@click.option("--glob", "globs", multiple=True, help="Repeatable glob filter. Defaults to '*'.")
+@click.option("--ext", "extensions", multiple=True, help="Repeatable file extension filter, such as png or jpg.")
+@click.option("--hidden", "include_hidden", is_flag=True, help="Include dotfiles and files inside hidden directories.")
+@click.option("--limit", type=click.IntRange(1, None), default=None, help="Maximum number of files to add.")
+@click.option("--website", default=None)
+@click.option("--tag", "tags", multiple=True)
+@click.option("--annotation", default=None)
+@click.option("--folder-id", default=None)
+@click.option("--folder-name", default=None, help="Exact target folder name.")
+@click.option("--folder-path", default=None, help="Exact target folder path.")
+@click.option("--save-manifest", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write the generated add-path manifest to a JSON file.")
+@pass_app
+def item_add_dir(
+    app: AppContext,
+    directory: Path,
+    recursive: bool,
+    globs: tuple[str, ...],
+    extensions: tuple[str, ...],
+    include_hidden: bool,
+    limit: int | None,
+    website: str | None,
+    tags: tuple[str, ...],
+    annotation: str | None,
+    folder_id: str | None,
+    folder_name: str | None,
+    folder_path: str | None,
+    save_manifest: Path | None,
+) -> None:
+    target_folder = _resolve_folder_selector(
+        app,
+        folder_id=folder_id,
+        folder_name=folder_name,
+        folder_path=folder_path,
+        purpose="target folder",
+        required=False,
+    )
+    files = _collect_files_from_directory(
+        directory,
+        recursive=recursive,
+        globs=globs,
+        extensions=extensions,
+        include_hidden=include_hidden,
+        limit=limit,
+    )
+    items = [
+        {
+            "path": str(path),
+            "name": path.stem,
+            **({"website": website} if website else {}),
+            **({"tags": list(tags)} if tags else {}),
+            **({"annotation": annotation} if annotation else {}),
+        }
+        for path in files
+    ]
+    if save_manifest is not None:
+        _write_manifest(
+            save_manifest,
+            {
+                "kind": "eagle-cli-add-paths-manifest",
+                "version": 1,
+                "source_directory": str(directory),
+                "recursive": recursive,
+                "globs": list(globs),
+                "extensions": list(extensions),
+                "items": items,
+            },
+        )
+    payload: dict[str, Any] = {"items": items}
+    if target_folder:
+        payload["folderId"] = target_folder.id
+    _run_mutation(
+        app,
+        "item add-dir",
+        endpoint="/api/item/addFromPaths",
+        payload=payload,
+        action=lambda: app.client.item_add_from_paths(items, folder_id=target_folder.id if target_folder else None),
+        resolved={
+            "folder": _folder_row(target_folder) if target_folder else None,
+            "directory": str(directory),
+            "file_count": len(items),
+            "saved_manifest": str(save_manifest) if save_manifest is not None else None,
+        },
     )
 
 
@@ -1272,6 +1544,175 @@ def _build_item_filters_from_preset(app: AppContext, raw_params: dict[str, Any])
     }
 
 
+def _bulk_update_result(
+    app: AppContext,
+    *,
+    item_ids: tuple[str, ...],
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+    set_tags: tuple[str, ...],
+    add_tags: tuple[str, ...],
+    annotation: str | None,
+    source_url: str | None,
+    star: int | None,
+    save_plan: Path | None,
+) -> dict[str, Any]:
+    _validate_bulk_update_request(
+        item_ids=item_ids,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+        set_tags=set_tags,
+        add_tags=add_tags,
+        annotation=annotation,
+        source_url=source_url,
+        star=star,
+    )
+
+    source_items = _collect_target_items(
+        app,
+        item_ids=item_ids,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    operations: list[dict[str, Any]] = []
+    for item in source_items:
+        next_tags = list(set_tags) if set_tags else None
+        if add_tags:
+            current_tags = list(item.get("tags") or [])
+            for tag in add_tags:
+                if tag not in current_tags:
+                    current_tags.append(tag)
+            next_tags = current_tags
+
+        payload: dict[str, Any] = {"id": item["id"]}
+        if next_tags is not None:
+            payload["tags"] = next_tags
+        if annotation is not None:
+            payload["annotation"] = annotation
+        if source_url is not None:
+            payload["url"] = source_url
+        if star is not None:
+            payload["star"] = star
+        operations.append(
+            {
+                "method": "POST",
+                "item": {
+                    "id": item.get("id"),
+                    "name": item.get("name"),
+                    "existing_tags": item.get("tags") or [],
+                },
+                "endpoint": "/api/item/update",
+                "payload": payload,
+                "description": f"Update item {item.get('id')} ({item.get('name')})",
+            }
+        )
+
+    if save_plan is not None:
+        _write_plan(
+            save_plan,
+            _plan_document(
+                "item bulk-update",
+                operations,
+                context={
+                    "matched_count": len(operations),
+                    "filters": _item_filter_payload_from_args(
+                        limit=limit,
+                        offset=offset,
+                        order_by=order_by,
+                        keyword=keyword,
+                        ext=ext,
+                        tags=tags,
+                        folders=folders,
+                        folder_names=folder_names,
+                        folder_paths=folder_paths,
+                    ),
+                    "item_ids": list(item_ids),
+                },
+            ),
+        )
+
+    if app.dry_run:
+        return {
+            "status": "dry-run",
+            "data": {
+                "matched_count": len(operations),
+                "operations": operations,
+                "saved_plan": str(save_plan) if save_plan is not None else None,
+            },
+        }
+
+    results = []
+    for operation in operations:
+        payload = operation["payload"]
+        response = app.client.item_update(
+            payload["id"],
+            tags=payload.get("tags"),
+            annotation=payload.get("annotation"),
+            url=payload.get("url"),
+            star=payload.get("star"),
+        )
+        results.append(
+            {
+                "id": payload["id"],
+                "name": operation["item"]["name"],
+                "updated_fields": sorted([key for key in payload.keys() if key != "id"]),
+                "response": response.get("status", "success"),
+            }
+        )
+
+    return {
+        "status": "success",
+        "data": {
+            "matched_count": len(operations),
+            "updated_count": len(results),
+            "items": results,
+            "operations": operations,
+            "saved_plan": str(save_plan) if save_plan is not None else None,
+        },
+    }
+
+
+def _validate_bulk_update_request(
+    *,
+    item_ids: tuple[str, ...],
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+    set_tags: tuple[str, ...],
+    add_tags: tuple[str, ...],
+    annotation: str | None,
+    source_url: str | None,
+    star: int | None,
+) -> None:
+    if not any([set_tags, add_tags, annotation is not None, source_url is not None, star is not None]):
+        raise click.ClickException("Provide at least one mutation field such as --set-tag, --add-tag, --annotation, --url, or --star.")
+    if item_ids and any([keyword, ext, tags, folders, folder_names, folder_paths]):
+        raise click.ClickException("Use either explicit --item-id values or filters, not both.")
+    if not item_ids and not any([keyword, ext, tags, folders, folder_names, folder_paths]):
+        raise click.ClickException("Refusing to bulk-update without item IDs or at least one filter.")
+
+
 def _collect_target_items(
     app: AppContext,
     *,
@@ -1536,6 +1977,117 @@ def _folder_row(record: FolderRecord | None) -> dict[str, Any] | None:
     }
 
 
+def _library_info_data(app: AppContext) -> dict[str, Any]:
+    return app.client.library_info().get("data") or {}
+
+
+def _smart_folder_records(app: AppContext) -> list[SmartFolderRecord]:
+    return _smart_folder_records_from_data(_library_info_data(app).get("smartFolders") or [])
+
+
+def _smart_folder_records_from_data(data: list[dict[str, Any]]) -> list[SmartFolderRecord]:
+    return flatten_smart_folders(data)
+
+
+def _smart_folder_row(record: SmartFolderRecord | None) -> dict[str, Any] | None:
+    if record is None:
+        return None
+    conditions = record.raw.get("conditions") or []
+    return {
+        "id": record.id,
+        "name": record.name,
+        "path": record.path,
+        "depth": record.depth,
+        "parent_id": record.parent_id or "",
+        "icon": record.raw.get("icon", ""),
+        "condition_count": len(conditions) if isinstance(conditions, list) else 0,
+        "rule_count": len(smart_folder_rule_rows([record])),
+    }
+
+
+def _resolve_smart_folder_selector(
+    app: AppContext,
+    *,
+    smart_folder_id: str | None = None,
+    smart_folder_name: str | None = None,
+    smart_folder_path: str | None = None,
+    purpose: str,
+    required: bool,
+) -> SmartFolderRecord | None:
+    records = _smart_folder_records(app) if any([smart_folder_id, smart_folder_name, smart_folder_path]) else []
+    return _resolve_smart_folder_record_from_records(
+        records,
+        smart_folder_id=smart_folder_id,
+        smart_folder_name=smart_folder_name,
+        smart_folder_path=smart_folder_path,
+        purpose=purpose,
+        required=required,
+    )
+
+
+def _resolve_smart_folder_record_from_records(
+    records: list[SmartFolderRecord],
+    *,
+    smart_folder_id: str | None = None,
+    smart_folder_name: str | None = None,
+    smart_folder_path: str | None = None,
+    purpose: str,
+    required: bool = True,
+) -> SmartFolderRecord | None:
+    selected = [value for value in [smart_folder_id, smart_folder_name, smart_folder_path] if value]
+    if len(selected) > 1:
+        raise click.ClickException(f"Use only one selector for {purpose}: ID, name, or path.")
+    if not selected:
+        if required:
+            raise click.ClickException(f"Missing selector for {purpose}.")
+        return None
+
+    if smart_folder_id:
+        for record in records:
+            if record.id == smart_folder_id:
+                return record
+        raise click.ClickException(f"Unknown {purpose} ID: {smart_folder_id}")
+
+    if smart_folder_path:
+        match = find_smart_folder_by_path(records, smart_folder_path)
+        if match is None:
+            raise click.ClickException(f"Could not find {purpose} path: {normalize_folder_path(smart_folder_path)}")
+        return match
+
+    matches = find_smart_folders_by_name(records, smart_folder_name or "", exact=True)
+    if not matches:
+        raise click.ClickException(f"Could not find exact {purpose} name: {smart_folder_name}. Try `smart-folder list` first.")
+    if len(matches) > 1:
+        paths = ", ".join(match.path for match in matches)
+        raise click.ClickException(f"Ambiguous {purpose} name '{smart_folder_name}'. Matches: {paths}")
+    return matches[0]
+
+
+def _tag_groups(app: AppContext) -> list[dict[str, Any]]:
+    return list(_library_info_data(app).get("tagsGroups") or [])
+
+
+def _resolve_tag_group(app: AppContext, *, group_id: str | None, group_name: str | None) -> dict[str, Any]:
+    selected = [value for value in [group_id, group_name] if value]
+    if len(selected) > 1:
+        raise click.ClickException("Use either --id or --name for tag groups, not both.")
+    if not selected:
+        raise click.ClickException("Missing selector for tag group. Use --id or --name.")
+    groups = _tag_groups(app)
+    if group_id:
+        for group in groups:
+            if str(group.get("id", "")) == group_id:
+                return group
+        raise click.ClickException(f"Unknown tag group ID: {group_id}")
+    matches = [group for group in groups if str(group.get("name", "")).casefold() == str(group_name).casefold()]
+    if not matches:
+        raise click.ClickException(f"Could not find exact tag group name: {group_name}")
+    if len(matches) > 1:
+        ids = ", ".join(str(group.get("id", "")) for group in matches)
+        raise click.ClickException(f"Ambiguous tag group name '{group_name}'. Matching IDs: {ids}")
+    return matches[0]
+
+
 def _parse_kv_pairs(items: tuple[str, ...]) -> dict[str, str]:
     parsed: dict[str, str] = {}
     for item in items:
@@ -1620,6 +2172,38 @@ def _load_batch_items_from_urls(
     ]
 
 
+def _collect_files_from_directory(
+    directory: Path,
+    *,
+    recursive: bool,
+    globs: tuple[str, ...],
+    extensions: tuple[str, ...],
+    include_hidden: bool,
+    limit: int | None,
+) -> list[Path]:
+    patterns = list(globs) or ["*"]
+    allowed_extensions = {value.strip().lower().lstrip(".") for value in extensions if value.strip()}
+    seen: list[Path] = []
+    for pattern in patterns:
+        iterator = directory.rglob(pattern) if recursive else directory.glob(pattern)
+        for path in iterator:
+            if not path.is_file():
+                continue
+            relative_parts = path.relative_to(directory).parts
+            if not include_hidden and any(part.startswith(".") for part in relative_parts):
+                continue
+            if allowed_extensions and path.suffix.lower().lstrip(".") not in allowed_extensions:
+                continue
+            if path not in seen:
+                seen.append(path)
+    files = sorted(seen, key=lambda value: str(value).casefold())
+    if limit is not None:
+        files = files[:limit]
+    if not files:
+        raise click.ClickException("No files matched the requested directory filters.")
+    return files
+
+
 def _derive_name_from_url(url: str) -> str:
     parsed = urlparse(url)
     tail = Path(parsed.path).name
@@ -1669,6 +2253,11 @@ def _plan_document(command_name: str, operations: list[dict[str, Any]], *, conte
 
 
 def _write_plan(path: Path, document: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _write_manifest(path: Path, document: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 

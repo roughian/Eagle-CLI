@@ -4,14 +4,15 @@ import json
 from pathlib import Path
 from typing import Any
 
-from cli_anything.eagle.core.state import DEFAULT_STATE_DIR
+from cli_anything.eagle.core.state import DEFAULT_STATE_DIR, LEGACY_STATE_DIR
 
 
 PRESETS_PATH = DEFAULT_STATE_DIR / "presets.json"
+LEGACY_PRESETS_PATH = LEGACY_STATE_DIR / "presets.json"
 
 
 def load_presets(path: Path | None = None) -> dict[str, Any]:
-    preset_path = path or PRESETS_PATH
+    preset_path = path or _resolve_preset_path()
     if not preset_path.exists():
         return {"version": 1, "presets": {}}
     data = json.loads(preset_path.read_text(encoding="utf-8"))
@@ -45,3 +46,11 @@ def delete_preset(name: str, path: Path | None = None) -> bool:
     del presets[name]
     save_presets(data, path)
     return True
+
+
+def _resolve_preset_path() -> Path:
+    if PRESETS_PATH.exists():
+        return PRESETS_PATH
+    if LEGACY_PRESETS_PATH.exists():
+        return LEGACY_PRESETS_PATH
+    return PRESETS_PATH

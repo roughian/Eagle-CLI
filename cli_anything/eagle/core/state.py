@@ -10,10 +10,12 @@ from typing import Any
 DEFAULT_STATE_DIR = Path(
     os.environ.get(
         "EAGLE_AGENT_STATE_DIR",
-        Path.home() / ".config" / "eagle-agent-harness",
+        Path.home() / ".config" / "cli-anything-eagle",
     )
 )
+LEGACY_STATE_DIR = Path.home() / ".config" / "eagle-agent-harness"
 DEFAULT_STATE_PATH = DEFAULT_STATE_DIR / "session.json"
+LEGACY_STATE_PATH = LEGACY_STATE_DIR / "session.json"
 
 
 @dataclass
@@ -28,7 +30,7 @@ class SessionState:
 
     @classmethod
     def load(cls, path: Path | None = None) -> "SessionState":
-        state_path = path or DEFAULT_STATE_PATH
+        state_path = _resolve_state_path(path)
         if not state_path.exists():
             return cls()
 
@@ -75,3 +77,13 @@ def _collect_ids(value: Any, kind: str) -> list[str]:
         if item_id not in seen:
             seen.append(item_id)
     return seen
+
+
+def _resolve_state_path(path: Path | None) -> Path:
+    if path is not None:
+        return path
+    if DEFAULT_STATE_PATH.exists():
+        return DEFAULT_STATE_PATH
+    if LEGACY_STATE_PATH.exists():
+        return LEGACY_STATE_PATH
+    return DEFAULT_STATE_PATH

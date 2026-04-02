@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cli-anything-eagle"
-version = "0.3.0"
+version = "0.4.0"
 description = "CLI-Anything style harness for controlling Eagle through its local API."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,9 +29,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/roughian/Eagle-CLI"
-Repository = "https://github.com/roughian/Eagle-CLI"
-Issues = "https://github.com/roughian/Eagle-CLI/issues"
+Homepage = "https://github.com/roughian/CLI-Anything-Eagle"
+Repository = "https://github.com/roughian/CLI-Anything-Eagle"
+Issues = "https://github.com/roughian/CLI-Anything-Eagle/issues"
 
 [project.scripts]
 cli-anything-eagle = "cli_anything.eagle.eagle_cli:main"

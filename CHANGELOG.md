@@ -2,6 +2,12 @@
 
 This changelog summarizes the releases already reflected in the repository history and documentation.
 
+## 0.11.0
+- Added bridge health summaries that expose heartbeat age, queue depth, writability, and plugin-version mismatch information through `bridge status`.
+- Added `bridge doctor` and `bridge cleanup` so the external CLI can diagnose stale plugin installs and prune old bridge state without touching the plugin code.
+- Hardened bridge response and status-file reads so transient partial JSON no longer fails immediately while the plugin is still writing.
+- Tightened bridge timeout guidance so failed rename or move requests explain whether the plugin is missing, stale, or simply waiting on Eagle to restart.
+
 ## 0.10.0
 - Added persistent `config` commands for shared CLI defaults such as report format, export format, shell completion, and watch state path.
 - Added `report dashboard` for combined library, item, tag, folder, and trend summaries in a single output.

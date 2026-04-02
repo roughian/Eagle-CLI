@@ -498,6 +498,121 @@ class EagleCliTests(unittest.TestCase):
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.bridge_health")
+    def test_bridge_status_reports_health_summary(self, mock_bridge_health, mock_load, _mock_save):
+        from cli_anything.eagle import __version__
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_health.return_value = {
+            "template_dir": "/tmp/template",
+            "template_exists": True,
+            "layout": {
+                "state_dir": "/tmp/state",
+                "requests": "/tmp/requests",
+                "responses": "/tmp/responses",
+                "processed": "/tmp/processed",
+            },
+            "status_path": "/tmp/state/status.json",
+            "installed_plugin_paths": ["/tmp/plugins/example"],
+            "default_plugin_dirs": ["/tmp/plugins"],
+            "health": "healthy",
+            "heartbeat_age_seconds": 1.25,
+            "queue_depth": 0,
+            "pending_request_count": 0,
+            "pending_response_count": 0,
+            "processed_count": 2,
+            "writable": {"state_dir": True, "requests": True, "responses": True, "processed": True},
+            "status_error": None,
+            "plugin_version": __version__,
+            "status": {"updatedAt": "2026-04-02T00:00:00+00:00"},
+        }
+        result = self.runner.invoke(cli, ["--json", "bridge", "status"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["health"], "healthy")
+        self.assertFalse(payload["data"]["version_mismatch"])
+        self.assertEqual(payload["data"]["pending_request_count"], 0)
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli._bridge_ping_probe")
+    @patch("cli_anything.eagle.eagle_cli.bridge_health")
+    def test_bridge_doctor_reports_warning_when_ping_times_out(
+        self, mock_bridge_health, mock_ping_probe, mock_load, _mock_save
+    ):
+        from cli_anything.eagle import __version__
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_health.return_value = {
+            "template_dir": "/tmp/template",
+            "template_exists": True,
+            "layout": {
+                "state_dir": "/tmp/state",
+                "requests": "/tmp/requests",
+                "responses": "/tmp/responses",
+                "processed": "/tmp/processed",
+            },
+            "status_path": "/tmp/state/status.json",
+            "installed_plugin_paths": ["/tmp/plugins/example"],
+            "default_plugin_dirs": ["/tmp/plugins"],
+            "health": "stale",
+            "heartbeat_age_seconds": 45.0,
+            "queue_depth": 1,
+            "pending_request_count": 1,
+            "pending_response_count": 0,
+            "processed_count": 5,
+            "writable": {"state_dir": True, "requests": True, "responses": True, "processed": True},
+            "status_error": None,
+            "plugin_version": __version__,
+            "status": {"updatedAt": "2026-04-02T00:00:00+00:00"},
+        }
+        mock_ping_probe.return_value = {"status": "timeout", "error": "Timed out waiting for ping"}
+        result = self.runner.invoke(cli, ["--json", "bridge", "doctor", "--timeout", "1"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["status"], "warning")
+        self.assertFalse(payload["data"]["ready"])
+        self.assertTrue(any(check["name"] == "ping" and not check["ok"] for check in payload["data"]["checks"]))
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.prune_bridge_files")
+    def test_bridge_cleanup_dry_run_reports_candidates(self, mock_prune_bridge_files, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_prune_bridge_files.return_value = {
+            "max_age_seconds": 3600.0,
+            "keep_last": 20,
+            "dry_run": True,
+            "groups": {
+                "responses": {
+                    "examined_count": 4,
+                    "kept_count": 3,
+                    "candidates": [{"path": "/tmp/responses/old.json", "age_seconds": 7200.0, "deleted": False}],
+                }
+            },
+            "candidate_count": 1,
+            "deleted_count": 0,
+        }
+        result = self.runner.invoke(cli, ["--json", "--dry-run", "bridge", "cleanup", "--max-age-hours", "1"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["status"], "dry-run")
+        self.assertEqual(payload["data"]["candidate_count"], 1)
+        mock_prune_bridge_files.assert_called_once_with(
+            max_age_seconds=3600.0,
+            keep_last=20,
+            include_requests=False,
+            include_responses=True,
+            include_processed=True,
+            dry_run=True,
+        )
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
     @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
     def test_item_bulk_update_rejects_over_max_items(self, mock_item_list, mock_load, _mock_save):
         from cli_anything.eagle.core.state import SessionState

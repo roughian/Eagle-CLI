@@ -19,6 +19,7 @@
   declarative workflow dry runs.
 - Validate incremental watch planning plus shell-completion and schema helpers.
 - Validate persistent config defaults and combined dashboard reporting.
+- Validate bridge health summaries, doctor output, and cleanup dry runs.
 - Run a small live smoke check separately against read-only endpoints only.
 
 ## Commands
@@ -72,6 +73,9 @@ python3 -m cli_anything.eagle.eagle_cli --json --dry-run watch import-dir ./inco
 python3 -m cli_anything.eagle.eagle_cli --json completion script --shell zsh --output ./completions/cli-anything-eagle.zsh
 python3 -m cli_anything.eagle.eagle_cli --json schema show workflow --output ./schemas/workflow.json
 python3 -m cli_anything.eagle.eagle_cli --json bridge export-plugin ./bridge-plugin
+python3 -m cli_anything.eagle.eagle_cli --json bridge status
+python3 -m cli_anything.eagle.eagle_cli --json bridge doctor --skip-ping
+python3 -m cli_anything.eagle.eagle_cli --json --dry-run bridge cleanup --max-age-hours 0
 python3 -m cli_anything.eagle.eagle_cli --json item list --limit 2 --keyword CleanShot
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run item bulk-update --last --add-tag reviewed
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run item bulk-update --item-file ./items.json --add-tag reviewed
@@ -92,12 +96,14 @@ python3 -m cli_anything.eagle.eagle_cli report dashboard --help
 
 ## Result
 
-- `python3 -m unittest discover -s tests -v` passed with 66 tests.
+- `python3 -m unittest discover -s tests -v` passed with 69 tests.
 - Live smoke checks passed for:
   - `cli-anything-eagle --json doctor`
   - `cli-anything-eagle --json app info`
   - `cli-anything-eagle --json library summary`
   - `cli-anything-eagle --json bridge status`
+  - `cli-anything-eagle --json bridge doctor --skip-ping`
+  - `cli-anything-eagle --json --dry-run bridge cleanup --max-age-hours 0`
   - `cli-anything-eagle --json smart-folder audit`
   - `cli-anything-eagle --json smart-folder rules --name "대화 jpg"`
   - `cli-anything-eagle --json smart-folder run --name "대화 jpg"`

@@ -11,7 +11,8 @@ ingestion, incremental import watching, plan merge/filter/split/validate
 tooling, shell-completion helpers, document schemas, persistent config defaults,
 dashboard reports, high-level organize flows,
 and a companion bridge plugin for name and folder operations that are not
-available through the local HTTP API alone.
+available through the local HTTP API alone, plus bridge health diagnostics and
+cleanup helpers.
 
 ## Requirements
 
@@ -68,6 +69,7 @@ cli-anything-eagle --json config show
 cli-anything-eagle report dashboard ./reports/dashboard.md --format md --all
 cli-anything-eagle --json workflow validate ./workflow.yml
 cli-anything-eagle --json bridge status
+cli-anything-eagle --json bridge doctor --skip-ping
 ```
 
 ## Useful Workflows
@@ -222,6 +224,8 @@ Rename or move many items with the companion bridge plugin:
 ```bash
 cli-anything-eagle bridge install-plugin
 cli-anything-eagle --json bridge status
+cli-anything-eagle --json bridge doctor --skip-ping
+cli-anything-eagle --json --dry-run bridge cleanup --max-age-hours 24
 cli-anything-eagle --dry-run item rename-bulk --folder-name References --prefix archived-
 cli-anything-eagle --dry-run item move-bulk --tag reviewed --target-folder-path "Archive/Reviewed"
 ```
@@ -350,7 +354,7 @@ cli-anything-eagle config unset completion_shell
 - `snapshot create`, `show`, `diff`, `restore`
 - `audit duplicates`, `cleanup`, `cleanup-plan`, `dedupe-plan`
 - `organize apply`
-- `bridge status`, `export-plugin`, `install-plugin`, `ping`
+- `bridge status`, `doctor`, `cleanup`, `export-plugin`, `install-plugin`, `ping`
 - `workflow validate`, `run`
 - `ingest manifest`
 - `watch import-dir`
@@ -395,5 +399,10 @@ cli-anything-eagle config unset completion_shell
 - `bridge install-plugin` copies the bundled service plugin into Eagle's plugin
   directory. If Eagle is already open, restart it once so the background bridge
   can start.
+- `bridge status` and `bridge doctor` now summarize heartbeat freshness, queue
+  backlog, writable bridge directories, and whether the installed plugin build
+  matches the current CLI version.
+- `bridge cleanup` only removes old bridge request/response artifacts. Use
+  `--dry-run` first if you want to preview which files would be pruned.
 - Mutating commands support `--dry-run`, which is useful when sharing the CLI
   with other Eagle users who want to preview changes first.

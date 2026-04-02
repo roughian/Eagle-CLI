@@ -18,6 +18,7 @@ from cli_anything.eagle.core.bridge import (
     BRIDGE_PLUGIN_ID,
     BRIDGE_PLUGIN_NAME,
     DEFAULT_WAIT_SECONDS,
+    bridge_health,
     bridge_layout,
     companion_plugin_template_dir,
     default_plugin_dir_candidates,
@@ -26,6 +27,7 @@ from cli_anything.eagle.core.bridge import (
     install_companion_plugin,
     installed_plugin_paths,
     load_bridge_status,
+    prune_bridge_files,
     write_bridge_request,
     wait_for_bridge_response,
 )
@@ -556,25 +558,133 @@ def bridge() -> None:
 @bridge.command("status")
 @pass_app
 def bridge_status(app: AppContext) -> None:
-    layout = ensure_bridge_dirs()
-    installed = [str(path) for path in installed_plugin_paths()]
-    status = load_bridge_status()
+    _emit_and_remember(app, "bridge status", {"status": "success", "data": _bridge_status_payload()})
+
+
+@bridge.command("doctor")
+@click.option("--timeout", type=float, default=2.0, show_default=True, help="Seconds to wait for a ping response.")
+@click.option("--skip-ping", is_flag=True, help="Do not enqueue a ping request; only inspect local bridge state.")
+@pass_app
+def bridge_doctor(app: AppContext, timeout: float, skip_ping: bool) -> None:
+    summary = _bridge_status_payload()
+    ping: dict[str, Any] | None = None
+    checks: list[dict[str, Any]] = []
+
+    def add_check(name: str, ok: bool, severity: str, message: str, details: Any | None = None) -> None:
+        checks.append(
+            {
+                "name": name,
+                "ok": ok,
+                "status": "success" if ok else severity,
+                "message": message,
+                "details": details,
+            }
+        )
+
+    add_check(
+        "template",
+        bool(summary.get("template_exists")),
+        "error",
+        "Companion plugin template is available." if summary.get("template_exists") else "Companion plugin template is missing.",
+        summary.get("template_dir"),
+    )
+    add_check(
+        "install",
+        bool(summary.get("installed_plugin_paths")),
+        "error",
+        "Companion plugin is installed." if summary.get("installed_plugin_paths") else "Companion plugin is not installed.",
+        summary.get("installed_plugin_paths") or summary.get("default_plugin_dirs"),
+    )
+    writable = summary.get("writable") or {}
+    add_check(
+        "state-dirs",
+        all(bool(value) for value in writable.values()),
+        "error",
+        "Bridge state directories are writable." if all(bool(value) for value in writable.values()) else "One or more bridge state directories are not writable.",
+        writable,
+    )
+    if summary.get("status_error"):
+        add_check("status-file", False, "warning", "Bridge status file exists but could not be parsed.", summary.get("status_error"))
+    elif summary.get("status") is None:
+        add_check("status-file", False, "warning", "Bridge status file has not been written yet.", summary.get("status_path"))
+    else:
+        add_check("status-file", True, "success", "Bridge status file is readable.", summary.get("status_path"))
+
+    health = str(summary.get("health") or "offline")
+    heartbeat_age_seconds = summary.get("heartbeat_age_seconds")
+    if health == "healthy":
+        add_check("heartbeat", True, "success", "Bridge heartbeat is healthy.", heartbeat_age_seconds)
+    elif health == "stale":
+        add_check("heartbeat", False, "warning", "Bridge heartbeat is stale.", heartbeat_age_seconds)
+    elif health == "stuck_queue":
+        add_check("heartbeat", False, "warning", "Bridge heartbeat is stale and requests are backing up.", heartbeat_age_seconds)
+    elif health == "invalid":
+        add_check("heartbeat", False, "warning", "Bridge heartbeat could not be parsed.", summary.get("status_error"))
+    else:
+        add_check("heartbeat", False, "warning", "Bridge heartbeat is offline.", heartbeat_age_seconds)
+
+    if summary.get("queue_depth", 0) == 0:
+        add_check("queue", True, "success", "No pending bridge queue backlog.", {"queue_depth": 0})
+    else:
+        add_check(
+            "queue",
+            False,
+            "warning",
+            "Bridge queue has pending files.",
+            {
+                "queue_depth": summary.get("queue_depth"),
+                "pending_request_count": summary.get("pending_request_count"),
+                "pending_response_count": summary.get("pending_response_count"),
+            },
+        )
+
+    plugin_version = summary.get("plugin_version")
+    if plugin_version and plugin_version != __version__:
+        add_check(
+            "version",
+            False,
+            "warning",
+            "Plugin bridge version does not match the CLI version.",
+            {"plugin_version": plugin_version, "cli_version": __version__},
+        )
+    else:
+        add_check(
+            "version",
+            True,
+            "success",
+            "Plugin bridge version matches the CLI or is not reported.",
+            {"plugin_version": plugin_version, "cli_version": __version__},
+        )
+
+    if not skip_ping:
+        ping = _bridge_ping_probe(app.base_url, timeout_seconds=timeout)
+        add_check(
+            "ping",
+            ping.get("status") == "success",
+            "warning" if summary.get("installed_plugin_paths") else "error",
+            "Live bridge ping succeeded." if ping.get("status") == "success" else str(ping.get("error") or ping.get("status")),
+            ping,
+        )
+    else:
+        add_check("ping", True, "success", "Skipped live ping check.", None)
+
+    ready = bool(summary.get("installed_plugin_paths")) and health == "healthy" and (skip_ping or ping.get("status") == "success")
+
     _emit_and_remember(
         app,
-        "bridge status",
+        "bridge doctor",
         {
-            "status": "success",
+            "status": "error"
+            if any(check["status"] == "error" for check in checks)
+            else "warning"
+            if any(check["status"] == "warning" for check in checks)
+            else "success",
             "data": {
-                "plugin_id": BRIDGE_PLUGIN_ID,
-                "plugin_name": BRIDGE_PLUGIN_NAME,
-                "template_dir": str(companion_plugin_template_dir()),
-                "state_dir": str(layout["state_dir"]),
-                "request_dir": str(layout["requests"]),
-                "response_dir": str(layout["responses"]),
-                "processed_dir": str(layout["processed"]),
-                "installed_plugin_paths": installed,
-                "default_plugin_dirs": [str(path) for path in default_plugin_dir_candidates()],
-                "status": status,
+                **summary,
+                "ping": ping,
+                "ready": ready,
+                "checks": checks,
+                "suggestions": _bridge_suggestions(summary, ping),
             },
         },
     )
@@ -606,6 +716,8 @@ def bridge_install_plugin(app: AppContext, plugin_dir: Path | None) -> None:
                 "installed_to": str(installed_path),
                 "plugin_root": str(target_root),
                 "plugin_id": BRIDGE_PLUGIN_ID,
+                "installed_plugin_paths": [str(path) for path in installed_plugin_paths([target_root])],
+                "restart_required": True,
             },
         },
     )
@@ -618,6 +730,41 @@ def bridge_install_plugin(app: AppContext, plugin_dir: Path | None) -> None:
 def bridge_ping(app: AppContext, timeout: float, queue_only: bool) -> None:
     result = _bridge_request("ping", {"base_url": app.base_url}, timeout_seconds=timeout, queue_only=queue_only)
     _emit_and_remember(app, "bridge ping", result)
+
+
+@bridge.command("cleanup")
+@click.option("--max-age-hours", type=float, default=24.0, show_default=True, help="Only prune files older than this many hours.")
+@click.option("--keep-last", type=click.IntRange(0, None), default=20, show_default=True, help="Keep this many newest files per directory.")
+@click.option("--requests/--no-requests", "include_requests", default=False, help="Include pending request files.")
+@click.option("--responses/--no-responses", "include_responses", default=True, help="Include response files.")
+@click.option("--processed/--no-processed", "include_processed", default=True, help="Include processed request archives.")
+@pass_app
+def bridge_cleanup(
+    app: AppContext,
+    max_age_hours: float,
+    keep_last: int,
+    include_requests: bool,
+    include_responses: bool,
+    include_processed: bool,
+) -> None:
+    if not any([include_requests, include_responses, include_processed]):
+        raise click.ClickException("Select at least one bridge file group to clean up.")
+    result = prune_bridge_files(
+        max_age_seconds=max_age_hours * 3600.0,
+        keep_last=keep_last,
+        include_requests=include_requests,
+        include_responses=include_responses,
+        include_processed=include_processed,
+        dry_run=app.dry_run,
+    )
+    _emit_and_remember(
+        app,
+        "bridge cleanup",
+        {
+            "status": "dry-run" if app.dry_run else "success",
+            "data": result,
+        },
+    )
 
 
 @cli.group()
@@ -915,161 +1062,6 @@ def preset_run_bulk_update(app: AppContext, name: str, save_plan: Path | None) -
         save_plan=save_plan,
     )
     _emit_and_remember(app, f"preset run-bulk-update {name}", result)
-
-
-@cli.group("select")
-def selection_group() -> None:
-    """Saved item selection commands."""
-
-
-@selection_group.command("list")
-@pass_app
-def selection_list(app: AppContext) -> None:
-    _emit_and_remember(app, "select list", {"status": "success", "data": _list_selections()})
-
-
-@selection_group.command("save")
-@click.argument("name")
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to save.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None)
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
-@item_filter_options
-@pass_app
-def selection_save(
-    app: AppContext,
-    name: str,
-    item_ids: tuple[str, ...],
-    item_file: Path | None,
-    use_last: bool,
-    fetch_all: bool,
-    limit: int,
-    offset: int,
-    order_by: str | None,
-    keyword: str | None,
-    ext: str | None,
-    tags: tuple[str, ...],
-    folders: tuple[str, ...],
-    folder_names: tuple[str, ...],
-    folder_paths: tuple[str, ...],
-) -> None:
-    _validate_item_selector_request(
-        item_ids=item_ids,
-        item_file=item_file,
-        use_last=use_last,
-        fetch_all=fetch_all,
-        keyword=keyword,
-        ext=ext,
-        tags=tags,
-        folders=folders,
-        folder_names=folder_names,
-        folder_paths=folder_paths,
-    )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
-    query = _query_or_collect_items(
-        app,
-        item_ids=resolved_item_ids,
-        fetch_all=fetch_all,
-        limit=limit,
-        offset=offset,
-        order_by=order_by,
-        keyword=keyword,
-        ext=ext,
-        tags=tags,
-        folders=folders,
-        folder_names=folder_names,
-        folder_paths=folder_paths,
-    )
-    selection_ids = [str(item.get("id")) for item in query["items"] if str(item.get("id"))]
-    saved_path = _save_selection(
-        name,
-        selection_ids,
-        context={
-            "query": query["query"],
-            "pages": query["pages"],
-            "source": "cli",
-        },
-    )
-    _emit_and_remember(
-        app,
-        "select save",
-        {
-            "status": "success",
-            "data": {
-                "name": name,
-                "saved_to": str(saved_path),
-                "item_count": len(selection_ids),
-                "sample_ids": selection_ids[:10],
-            },
-        },
-    )
-
-
-@selection_group.command("show")
-@click.argument("name")
-@pass_app
-def selection_show(app: AppContext, name: str) -> None:
-    payload = _load_selection(name)
-    _emit_and_remember(app, "select show", {"status": "success", "data": payload})
-
-
-@selection_group.command("sample")
-@click.argument("name")
-@click.option("--count", type=click.IntRange(1, None), default=10, show_default=True)
-@pass_app
-def selection_sample(app: AppContext, name: str, count: int) -> None:
-    payload = _load_selection(name)
-    item_ids = [str(item_id) for item_id in payload.get("item_ids") or [] if str(item_id)]
-    _emit_and_remember(
-        app,
-        "select sample",
-        {
-            "status": "success",
-            "data": {
-                "name": payload.get("name") or name,
-                "item_count": len(item_ids),
-                "sample_ids": item_ids[:count],
-            },
-        },
-    )
-
-
-@selection_group.command("diff")
-@click.argument("left_name")
-@click.argument("right_name")
-@pass_app
-def selection_diff(app: AppContext, left_name: str, right_name: str) -> None:
-    left = _load_selection(left_name)
-    right = _load_selection(right_name)
-    left_ids = [str(item_id) for item_id in left.get("item_ids") or [] if str(item_id)]
-    right_ids = [str(item_id) for item_id in right.get("item_ids") or [] if str(item_id)]
-    left_set = set(left_ids)
-    right_set = set(right_ids)
-    _emit_and_remember(
-        app,
-        "select diff",
-        {
-            "status": "success",
-            "data": {
-                "left": {"name": left.get("name") or left_name, "item_count": len(left_ids)},
-                "right": {"name": right.get("name") or right_name, "item_count": len(right_ids)},
-                "shared_count": len(left_set & right_set),
-                "left_only_count": len(left_set - right_set),
-                "right_only_count": len(right_set - left_set),
-                "left_only": sorted(left_set - right_set)[:50],
-                "right_only": sorted(right_set - left_set)[:50],
-            },
-        },
-    )
-
-
-@selection_group.command("delete")
-@click.argument("name")
-@pass_app
-def selection_delete(app: AppContext, name: str) -> None:
-    if not _delete_selection(name):
-        raise click.ClickException(f"Unknown selection: {name}")
-    _emit_and_remember(app, "select delete", {"status": "success", "data": {"deleted": name}})
 
 
 @cli.group()
@@ -2806,134 +2798,6 @@ def audit_cleanup(
 
 @audit.command("cleanup-plan")
 @click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to audit.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
-@click.option(
-    "--kind",
-    "kinds",
-    multiple=True,
-    type=click.Choice(["untagged", "unfiled", "missing-url", "missing-annotation", "deleted"]),
-    help="Repeatable cleanup strategy.",
-)
-@click.option("--action", type=click.Choice(["add-tag", "trash", "move-folder"]), default="add-tag", show_default=True)
-@click.option("--review-tag", default="needs-review", show_default=True, help="Tag added when --action=add-tag.")
-@click.option("--target-folder-id", default=None)
-@click.option("--target-folder-name", default=None)
-@click.option("--target-folder-path", default=None)
-@click.option("--ensure-target-path", default=None, help="Create the target folder path before planning cleanup moves.")
-@click.option("--batch-size", type=click.IntRange(1, None), default=100, show_default=True)
-@click.option("--save-report", type=click.Path(dir_okay=False, path_type=Path), default=None)
-@item_filter_options
-@pass_app
-def audit_cleanup_plan(
-    app: AppContext,
-    output_file: Path,
-    item_ids: tuple[str, ...],
-    item_file: Path | None,
-    use_last: bool,
-    fetch_all: bool,
-    kinds: tuple[str, ...],
-    action: str,
-    review_tag: str,
-    target_folder_id: str | None,
-    target_folder_name: str | None,
-    target_folder_path: str | None,
-    ensure_target_path: str | None,
-    batch_size: int,
-    save_report: Path | None,
-    limit: int,
-    offset: int,
-    order_by: str | None,
-    keyword: str | None,
-    ext: str | None,
-    tags: tuple[str, ...],
-    folders: tuple[str, ...],
-    folder_names: tuple[str, ...],
-    folder_paths: tuple[str, ...],
-) -> None:
-    _validate_item_selector_request(
-        item_ids=item_ids,
-        item_file=item_file,
-        use_last=use_last,
-        fetch_all=fetch_all,
-        keyword=keyword,
-        ext=ext,
-        tags=tags,
-        folders=folders,
-        folder_names=folder_names,
-        folder_paths=folder_paths,
-    )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
-    query = _query_or_collect_items(
-        app,
-        item_ids=resolved_item_ids,
-        fetch_all=fetch_all,
-        limit=limit,
-        offset=offset,
-        order_by=order_by,
-        keyword=keyword,
-        ext=ext,
-        tags=tags,
-        folders=folders,
-        folder_names=folder_names,
-        folder_paths=folder_paths,
-    )
-    resolved_kinds = kinds or ("untagged", "unfiled", "missing-url")
-    ensure_result = None
-    target_folder = None
-    if action == "move-folder":
-        ensure_result, target_folder = _resolve_move_target(
-            app,
-            target_folder_id=target_folder_id,
-            target_folder_name=target_folder_name,
-            target_folder_path=target_folder_path,
-            ensure_target_path=ensure_target_path,
-        )
-    operations, summary = _build_cleanup_plan_operations(
-        query["items"],
-        kinds=resolved_kinds,
-        action=action,
-        review_tag=review_tag,
-        target_folder_id=target_folder.id if target_folder is not None else None,
-        target_folder_path=target_folder.path if target_folder is not None else None,
-        batch_size=batch_size,
-    )
-    context = {
-        "query": query["query"],
-        "pages": query["pages"],
-        "kinds": list(resolved_kinds),
-        "action": action,
-        "review_tag": review_tag if action == "add-tag" else None,
-        "target_folder": _folder_row(target_folder),
-        "ensure_result": ensure_result,
-        **summary,
-    }
-    _write_plan(output_file, _plan_document("audit cleanup-plan", operations, context=context))
-    report = {
-        "title": "CLI-Anything Eagle Cleanup Plan",
-        **context,
-        "operations": operations,
-        "saved_plan": str(output_file),
-    }
-    if save_report is not None:
-        _write_manifest(save_report, report)
-    _emit_and_remember(
-        app,
-        "audit cleanup-plan",
-        {
-            "status": "success",
-            "data": {
-                **report,
-                "saved_report": str(save_report) if save_report is not None else None,
-            },
-        },
-    )
-
-
-@audit.command("cleanup-plan")
-@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
 @click.option(
     "--kind",
     "kinds",
@@ -3436,870 +3300,6 @@ def organize_apply(
                 "rename_operation_count": len(rename_operations),
                 "rename_skipped": rename_skipped,
                 "bridge_results": bridge_results,
-            },
-        },
-    )
-
-
-@cli.group()
-def report() -> None:
-    """Write reusable library and item reports."""
-
-
-@report.command("library")
-@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
-@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html"]), default="auto", show_default=True)
-@pass_app
-def report_library(app: AppContext, output_file: Path, report_format: str) -> None:
-    document = {
-        "title": "CLI-Anything Eagle Library Report",
-        **build_library_summary(_library_info_data(app)),
-    }
-    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
-    _emit_and_remember(
-        app,
-        "report library",
-        {
-            "status": "success",
-            "data": {
-                "saved_to": str(output_file),
-                "report_format": resolved_format,
-                **document,
-            },
-        },
-    )
-
-
-@report.command("tags")
-@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
-@click.option("--top", type=click.IntRange(1, None), default=50, show_default=True)
-@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html", "csv"]), default="auto", show_default=True)
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None)
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
-@item_filter_options
-@pass_app
-def report_tags(
-    app: AppContext,
-    output_file: Path,
-    top: int,
-    report_format: str,
-    item_ids: tuple[str, ...],
-    item_file: Path | None,
-    use_last: bool,
-    fetch_all: bool,
-    limit: int,
-    offset: int,
-    order_by: str | None,
-    keyword: str | None,
-    ext: str | None,
-    tags: tuple[str, ...],
-    folders: tuple[str, ...],
-    folder_names: tuple[str, ...],
-    folder_paths: tuple[str, ...],
-) -> None:
-    _validate_item_selector_request(
-        item_ids=item_ids,
-        item_file=item_file,
-        use_last=use_last,
-        fetch_all=fetch_all,
-        keyword=keyword,
-        ext=ext,
-        tags=tags,
-        folders=folders,
-        folder_names=folder_names,
-        folder_paths=folder_paths,
-    )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
-    query = _query_or_collect_items(
-        app,
-        item_ids=resolved_item_ids,
-        fetch_all=fetch_all,
-        limit=limit,
-        offset=offset,
-        order_by=order_by,
-        keyword=keyword,
-        ext=ext,
-        tags=tags,
-        folders=folders,
-        folder_names=folder_names,
-        folder_paths=folder_paths,
-    )
-    document = {
-        "title": "CLI-Anything Eagle Tag Report",
-        **_build_tag_stats(query["items"], top=top),
-        "query": query["query"],
-        "pages": query["pages"],
-    }
-    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
-    _emit_and_remember(
-        app,
-        "report tags",
-        {
-            "status": "success",
-            "data": {
-                "saved_to": str(output_file),
-                "report_format": resolved_format,
-                **document,
-            },
-        },
-    )
-
-
-@report.command("folders")
-@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
-@click.option("--top", type=click.IntRange(1, None), default=50, show_default=True)
-@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html", "csv"]), default="auto", show_default=True)
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None)
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
-@item_filter_options
-@pass_app
-def report_folders(
-    app: AppContext,
-    output_file: Path,
-    top: int,
-    report_format: str,
-    item_ids: tuple[str, ...],
-    item_file: Path | None,
-    use_last: bool,
-    fetch_all: bool,
-    limit: int,
-    offset: int,
-    order_by: str | None,
-    keyword: str | None,
-    ext: str | None,
-    tags: tuple[str, ...],
-    folders: tuple[str, ...],
-    folder_names: tuple[str, ...],
-    folder_paths: tuple[str, ...],
-) -> None:
-    _validate_item_selector_request(
-        item_ids=item_ids,
-        item_file=item_file,
-        use_last=use_last,
-        fetch_all=fetch_all,
-        keyword=keyword,
-        ext=ext,
-        tags=tags,
-        folders=folders,
-        folder_names=folder_names,
-        folder_paths=folder_paths,
-    )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
-    query = _query_or_collect_items(
-        app,
-        item_ids=resolved_item_ids,
-        fetch_all=fetch_all,
-        limit=limit,
-        offset=offset,
-        order_by=order_by,
-        keyword=keyword,
-        ext=ext,
-        tags=tags,
-        folders=folders,
-        folder_names=folder_names,
-        folder_paths=folder_paths,
-    )
-    document = {
-        "title": "CLI-Anything Eagle Folder Report",
-        **_build_folder_stats(app, query["items"], top=top),
-        "query": query["query"],
-        "pages": query["pages"],
-    }
-    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
-    _emit_and_remember(
-        app,
-        "report folders",
-        {
-            "status": "success",
-            "data": {
-                "saved_to": str(output_file),
-                "report_format": resolved_format,
-                **document,
-            },
-        },
-    )
-
-
-@report.command("trend")
-@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
-@click.option("--bucket", type=click.Choice(["month", "year"]), default="month", show_default=True)
-@click.option("--field", type=click.Choice(["modification", "created"]), default="modification", show_default=True)
-@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html", "csv"]), default="auto", show_default=True)
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None)
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
-@item_filter_options
-@pass_app
-def report_trend(
-    app: AppContext,
-    output_file: Path,
-    bucket: str,
-    field: str,
-    report_format: str,
-    item_ids: tuple[str, ...],
-    item_file: Path | None,
-    use_last: bool,
-    fetch_all: bool,
-    limit: int,
-    offset: int,
-    order_by: str | None,
-    keyword: str | None,
-    ext: str | None,
-    tags: tuple[str, ...],
-    folders: tuple[str, ...],
-    folder_names: tuple[str, ...],
-    folder_paths: tuple[str, ...],
-) -> None:
-    _validate_item_selector_request(
-        item_ids=item_ids,
-        item_file=item_file,
-        use_last=use_last,
-        fetch_all=fetch_all,
-        keyword=keyword,
-        ext=ext,
-        tags=tags,
-        folders=folders,
-        folder_names=folder_names,
-        folder_paths=folder_paths,
-    )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
-    query = _query_or_collect_items(
-        app,
-        item_ids=resolved_item_ids,
-        fetch_all=fetch_all,
-        limit=limit,
-        offset=offset,
-        order_by=order_by,
-        keyword=keyword,
-        ext=ext,
-        tags=tags,
-        folders=folders,
-        folder_names=folder_names,
-        folder_paths=folder_paths,
-    )
-    document = {
-        "title": "CLI-Anything Eagle Trend Report",
-        "bucket": bucket,
-        "field": field,
-        "total_items": len(query["items"]),
-        "rows": _trend_rows(query["items"], bucket=bucket, field=field),
-        "query": query["query"],
-        "pages": query["pages"],
-    }
-    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
-    _emit_and_remember(
-        app,
-        "report trend",
-        {
-            "status": "success",
-            "data": {
-                "saved_to": str(output_file),
-                "report_format": resolved_format,
-                **document,
-            },
-        },
-    )
-
-
-@report.command("dashboard")
-@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
-@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html"]), default="auto", show_default=True)
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
-@click.option("--top", type=click.IntRange(1, None), default=20, show_default=True)
-@click.option("--bucket", type=click.Choice(["month", "year"]), default="month", show_default=True)
-@click.option("--field", type=click.Choice(["created", "modification"]), default="modification", show_default=True)
-@item_filter_options
-@pass_app
-def report_dashboard(
-    app: AppContext,
-    output_file: Path,
-    report_format: str,
-    item_ids: tuple[str, ...],
-    item_file: Path | None,
-    use_last: bool,
-    fetch_all: bool,
-    top: int,
-    bucket: str,
-    field: str,
-    limit: int,
-    offset: int,
-    order_by: str | None,
-    keyword: str | None,
-    ext: str | None,
-    tags: tuple[str, ...],
-    folders: tuple[str, ...],
-    folder_names: tuple[str, ...],
-    folder_paths: tuple[str, ...],
-) -> None:
-    _validate_item_selector_request(
-        item_ids=item_ids,
-        item_file=item_file,
-        use_last=use_last,
-        fetch_all=fetch_all,
-        keyword=keyword,
-        ext=ext,
-        tags=tags,
-        folders=folders,
-        folder_names=folder_names,
-        folder_paths=folder_paths,
-    )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
-    query = _query_or_collect_items(
-        app,
-        item_ids=resolved_item_ids,
-        fetch_all=fetch_all,
-        limit=limit,
-        offset=offset,
-        order_by=order_by,
-        keyword=keyword,
-        ext=ext,
-        tags=tags,
-        folders=folders,
-        folder_names=folder_names,
-        folder_paths=folder_paths,
-    )
-    library_info = _library_info_data(app)
-    trend_rows = _trend_rows(query["items"], bucket=bucket, field=field)
-    document = {
-        "title": "CLI-Anything Eagle Dashboard",
-        "generated_at": _utc_now(),
-        "query": query["query"],
-        "pages": query["pages"],
-        "library": build_library_summary(library_info),
-        "item_summary": _summarize_items(app, query["items"], top=top),
-        "tag_stats": _build_tag_stats(query["items"], top=top),
-        "folder_stats": _build_folder_stats(app, query["items"], top=top),
-        "trend": {
-            "bucket": bucket,
-            "field": field,
-            "rows": trend_rows,
-        },
-        "rows": trend_rows,
-    }
-    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
-    _emit_and_remember(
-        app,
-        "report dashboard",
-        {
-            "status": "success",
-            "data": {
-                "saved_to": str(output_file),
-                "format": resolved_format,
-                "item_count": len(query["items"]),
-                "top": top,
-                "bucket": bucket,
-                "field": field,
-            },
-        },
-    )
-
-
-@cli.group()
-def workflow() -> None:
-    """Declarative workflow commands."""
-
-
-@workflow.command("validate")
-@click.argument("workflow_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@pass_app
-def workflow_validate(app: AppContext, workflow_file: Path) -> None:
-    payload = _load_workflow(workflow_file)
-    validation = _validate_workflow_document(payload)
-    _emit_and_remember(
-        app,
-        "workflow validate",
-        {
-            "status": "success" if validation["valid"] else "invalid",
-            "data": {
-                "workflow_file": str(workflow_file),
-                **validation,
-            },
-        },
-    )
-
-
-@workflow.command("run")
-@click.argument("workflow_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--save-plan", type=click.Path(dir_okay=False, path_type=Path), default=None)
-@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
-@click.option("--queue-only", is_flag=True, help="Queue bridge work without waiting for Eagle to process it.")
-@pass_app
-def workflow_run(
-    app: AppContext,
-    workflow_file: Path,
-    save_plan: Path | None,
-    bridge_timeout: float,
-    queue_only: bool,
-) -> None:
-    payload = _load_workflow(workflow_file)
-    validation = _validate_workflow_document(payload)
-    if not validation["valid"]:
-        raise click.ClickException("; ".join(validation["errors"]))
-    working_items, query = _workflow_items(app, payload)
-    step_results: list[dict[str, Any]] = []
-    aggregate_operations: list[dict[str, Any]] = []
-    for index, step in enumerate(payload.get("steps") or [], start=1):
-        action = step.get("action")
-        name = step.get("name") or f"step-{index}"
-        if action == "snapshot":
-            output_file = Path(step["output"])
-            document = _snapshot_document(
-                f"workflow:{name}",
-                working_items,
-                context={"workflow_file": str(workflow_file), "step": name},
-            )
-            if not app.dry_run:
-                _write_snapshot(output_file, document)
-            step_results.append(
-                {
-                    "name": name,
-                    "action": action,
-                    "saved_to": str(output_file),
-                    "item_count": len(working_items),
-                }
-            )
-            continue
-        if action == "export-items":
-            output_file = Path(step["output"])
-            requested_format = str(step.get("format", "auto"))
-            if not app.dry_run:
-                resolved_format = _write_items_export(output_file, working_items, requested_format)
-            else:
-                resolved_format = _infer_export_format(output_file, requested_format)
-            step_results.append(
-                {
-                    "name": name,
-                    "action": action,
-                    "saved_to": str(output_file),
-                    "format": resolved_format,
-                    "item_count": len(working_items),
-                }
-            )
-            continue
-        if action in {"report-tags", "report-folders", "report-trend"}:
-            output_file = Path(step["output"])
-            requested_format = str(step.get("format", "auto"))
-            if action == "report-tags":
-                document = {
-                    "title": f"Workflow Tag Report: {name}",
-                    **_build_tag_stats(working_items, top=int(step.get("top", 50))),
-                }
-            elif action == "report-folders":
-                document = {
-                    "title": f"Workflow Folder Report: {name}",
-                    **_build_folder_stats(app, working_items, top=int(step.get("top", 50))),
-                }
-            else:
-                bucket = str(step.get("bucket", "month"))
-                field = str(step.get("field", "modification"))
-                document = {
-                    "title": f"Workflow Trend Report: {name}",
-                    "bucket": bucket,
-                    "field": field,
-                    "total_items": len(working_items),
-                    "rows": _trend_rows(working_items, bucket=bucket, field=field),
-                }
-            if not app.dry_run:
-                resolved_format = _write_report(output_file, document, requested_format=requested_format)
-            else:
-                resolved_format = _infer_report_format(output_file, requested_format)
-            step_results.append(
-                {
-                    "name": name,
-                    "action": action,
-                    "saved_to": str(output_file),
-                    "format": resolved_format,
-                }
-            )
-            continue
-        if action == "bulk-update":
-            operations, skipped = _build_item_update_operations(
-                working_items,
-                set_tags=list(step.get("set_tags") or []),
-                add_tags=list(step.get("add_tags") or []),
-                annotation=step.get("annotation"),
-                source_url=step.get("url"),
-                star=step.get("star"),
-                skip_unchanged=bool(step.get("skip_unchanged", True)),
-            )
-            aggregate_operations.extend(operations)
-            _simulate_http_operations(working_items, operations)
-            step_results.append(
-                {
-                    "name": name,
-                    "action": action,
-                    "operation_count": len(operations),
-                    "skipped_count": len(skipped),
-                }
-            )
-            continue
-        if action == "rename":
-            rename_operations, skipped = _build_rename_operations(
-                working_items,
-                prefix=str(step.get("prefix", "")),
-                suffix=str(step.get("suffix", "")),
-                replace_from=step.get("replace_from"),
-                replace_to=str(step.get("replace_to", "")),
-                regex_from=step.get("regex_from"),
-                regex_to=str(step.get("regex_to", "")),
-                name_template=step.get("name_template"),
-                strip_names=bool(step.get("strip")),
-                skip_unchanged=bool(step.get("skip_unchanged", True)),
-            )
-            if rename_operations:
-                aggregate_operations.append(
-                    _make_bridge_operation(
-                        "rename_items",
-                        {"operations": rename_operations},
-                        description=f"Workflow rename step: {name}",
-                    )
-                )
-            _simulate_rename_operations(working_items, rename_operations)
-            step_results.append(
-                {
-                    "name": name,
-                    "action": action,
-                    "operation_count": len(rename_operations),
-                    "skipped_count": len(skipped),
-                }
-            )
-            continue
-        if action == "move":
-            ensure_result, target_folder = _resolve_move_target(
-                app,
-                target_folder_id=step.get("target_folder_id"),
-                target_folder_name=step.get("target_folder_name"),
-                target_folder_path=step.get("target_folder_path"),
-                ensure_target_path=step.get("ensure_target_path"),
-            )
-            move_operations, skipped = _build_move_operations(
-                working_items,
-                target_folder_id=target_folder.id if target_folder is not None else "",
-                target_folder_path=target_folder.path if target_folder is not None else "",
-                skip_unchanged=bool(step.get("skip_unchanged", True)),
-            )
-            if move_operations:
-                aggregate_operations.append(
-                    _make_bridge_operation(
-                        "move_items",
-                        {"operations": move_operations},
-                        description=f"Workflow move step: {name}",
-                    )
-                )
-            _simulate_move_operations(working_items, move_operations)
-            step_results.append(
-                {
-                    "name": name,
-                    "action": action,
-                    "target_folder": _folder_row(target_folder),
-                    "ensure_result": ensure_result,
-                    "operation_count": len(move_operations),
-                    "skipped_count": len(skipped),
-                }
-            )
-            continue
-    if save_plan is not None:
-        _write_plan(
-            save_plan,
-            _plan_document(
-                "workflow run",
-                aggregate_operations,
-                context={
-                    "workflow_file": str(workflow_file),
-                    "selection_query": query["query"],
-                    "step_count": len(payload.get("steps") or []),
-                },
-            ),
-        )
-    if app.dry_run:
-        _emit_and_remember(
-            app,
-            "workflow run",
-            {
-                "status": "dry-run",
-                "data": {
-                    "workflow_file": str(workflow_file),
-                    "selected_items": len(working_items),
-                    "steps": step_results,
-                    "operation_count": len(aggregate_operations),
-                    "saved_plan": str(save_plan) if save_plan is not None else None,
-                },
-            },
-        )
-        return
-    execution_results = _execute_operations(
-        app,
-        aggregate_operations,
-        bridge_timeout=bridge_timeout,
-        queue_only=queue_only,
-    )
-    _emit_and_remember(
-        app,
-        "workflow run",
-        {
-            "status": "success",
-            "data": {
-                "workflow_file": str(workflow_file),
-                "selected_items": len(working_items),
-                "steps": step_results,
-                "saved_plan": str(save_plan) if save_plan is not None else None,
-                "operation_count": len(aggregate_operations),
-                "results": execution_results,
-            },
-        },
-    )
-
-
-@cli.group()
-def ingest() -> None:
-    """Manifest-driven import commands."""
-
-
-@ingest.command("manifest")
-@click.argument("manifest_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--folder-id", default=None)
-@click.option("--folder-name", default=None)
-@click.option("--folder-path", default=None)
-@pass_app
-def ingest_manifest(
-    app: AppContext,
-    manifest_file: Path,
-    folder_id: str | None,
-    folder_name: str | None,
-    folder_path: str | None,
-) -> None:
-    target_folder = _resolve_folder_selector(
-        app,
-        folder_id=folder_id,
-        folder_name=folder_name,
-        folder_path=folder_path,
-        purpose="target folder",
-        required=False,
-    )
-    payload = _load_data_file(manifest_file)
-    if isinstance(payload, dict):
-        items = payload.get("items") or []
-    elif isinstance(payload, list):
-        items = payload
-    else:
-        raise click.ClickException("Manifest file must contain an items list or an object with an items field.")
-    if not isinstance(items, list) or not items:
-        raise click.ClickException("Manifest file does not contain any items.")
-    if all(isinstance(item, dict) and item.get("path") for item in items):
-        endpoint = "/api/item/addFromPaths"
-        action = lambda: app.client.item_add_from_paths(items, folder_id=target_folder.id if target_folder else None)
-    elif all(isinstance(item, dict) and item.get("url") for item in items):
-        endpoint = "/api/item/addFromURLs"
-        action = lambda: app.client.item_add_from_urls(items, folder_id=target_folder.id if target_folder else None)
-    else:
-        raise click.ClickException("Manifest items must all have either 'path' or 'url'.")
-    request_payload: dict[str, Any] = {"items": items}
-    if target_folder is not None:
-        request_payload["folderId"] = target_folder.id
-    _run_mutation(
-        app,
-        "ingest manifest",
-        endpoint=endpoint,
-        payload=request_payload,
-        action=action,
-        resolved={
-            "folder": _folder_row(target_folder) if target_folder is not None else None,
-            "manifest_file": str(manifest_file),
-            "item_count": len(items),
-        },
-    )
-
-
-@cli.group()
-def watch() -> None:
-    """Stateful import watcher commands."""
-
-
-@watch.command("import-dir")
-@click.argument("directory", type=click.Path(exists=True, file_okay=False, path_type=Path))
-@click.option("--state-file", type=click.Path(dir_okay=False, path_type=Path), default=None)
-@click.option("--recursive", is_flag=True, help="Walk subdirectories recursively.")
-@click.option("--glob", "globs", multiple=True, help="Repeatable glob filter. Defaults to '*'.")
-@click.option("--ext", "extensions", multiple=True, help="Repeatable file extension filter, such as png or jpg.")
-@click.option("--hidden", "include_hidden", is_flag=True, help="Include dotfiles and files inside hidden directories.")
-@click.option("--limit", type=click.IntRange(1, None), default=None, help="Maximum number of files to add.")
-@click.option("--website", default=None)
-@click.option("--tag", "tags", multiple=True)
-@click.option("--annotation", default=None)
-@click.option("--folder-id", default=None)
-@click.option("--folder-name", default=None, help="Exact target folder name.")
-@click.option("--folder-path", default=None, help="Exact target folder path.")
-@click.option("--name-template", default=None)
-@click.option("--tag-from-path", is_flag=True)
-@click.option("--tag-from-name", is_flag=True)
-@click.option("--save-manifest", type=click.Path(dir_okay=False, path_type=Path), default=None)
-@pass_app
-def watch_import_dir(
-    app: AppContext,
-    directory: Path,
-    state_file: Path | None,
-    recursive: bool,
-    globs: tuple[str, ...],
-    extensions: tuple[str, ...],
-    include_hidden: bool,
-    limit: int | None,
-    website: str | None,
-    tags: tuple[str, ...],
-    annotation: str | None,
-    folder_id: str | None,
-    folder_name: str | None,
-    folder_path: str | None,
-    name_template: str | None,
-    tag_from_path: bool,
-    tag_from_name: bool,
-    save_manifest: Path | None,
-) -> None:
-    state_file = _effective_watch_state_file(app, state_file)
-    target_folder = _resolve_folder_selector(
-        app,
-        folder_id=folder_id,
-        folder_name=folder_name,
-        folder_path=folder_path,
-        purpose="target folder",
-        required=False,
-    )
-    files = _collect_files_from_directory(
-        directory,
-        recursive=recursive,
-        globs=globs,
-        extensions=extensions,
-        include_hidden=include_hidden,
-        limit=limit,
-    )
-    previous_state = _load_watch_state(state_file)
-    previous_files = previous_state.get("files") or {}
-    current_signatures = {_file_signature(path)["path"]: _file_signature(path) for path in files}
-    changed_files = [path for path in files if previous_files.get(str(path)) != current_signatures[str(path)]]
-    items = _build_add_dir_items(
-        directory,
-        changed_files,
-        website=website,
-        tags=tags,
-        annotation=annotation,
-        name_template=name_template,
-        tag_from_path=tag_from_path,
-        tag_from_name=tag_from_name,
-    )
-    if save_manifest is not None:
-        _write_manifest(
-            save_manifest,
-            {
-                "kind": "eagle-cli-add-paths-manifest",
-                "version": 1,
-                "source_directory": str(directory),
-                "watched": True,
-                "changed_count": len(items),
-                "items": items,
-            },
-        )
-    if app.dry_run:
-        _emit_and_remember(
-            app,
-            "watch import-dir",
-            {
-                "status": "dry-run",
-                "data": {
-                    "directory": str(directory),
-                    "tracked_count": len(current_signatures),
-                    "changed_count": len(items),
-                    "changed_paths": [str(path) for path in changed_files[:100]],
-                    "saved_manifest": str(save_manifest) if save_manifest is not None else None,
-                },
-            },
-        )
-        return
-    response = {"status": "success", "data": {"status": "noop"}} if not items else app.client.item_add_from_paths(
-        items,
-        folder_id=target_folder.id if target_folder else None,
-    )
-    saved_state = _save_watch_state(
-        state_file,
-        {
-            "version": 1,
-            "directory": str(directory),
-            "updated_at": _utc_now(),
-            "files": current_signatures,
-        },
-    )
-    _emit_and_remember(
-        app,
-        "watch import-dir",
-        {
-            "status": "success",
-            "data": {
-                "directory": str(directory),
-                "tracked_count": len(current_signatures),
-                "changed_count": len(items),
-                "saved_manifest": str(save_manifest) if save_manifest is not None else None,
-                "saved_state": str(saved_state),
-                "folder": _folder_row(target_folder) if target_folder is not None else None,
-                "response": response,
-            },
-        },
-    )
-
-
-@cli.group()
-def completion() -> None:
-    """Shell completion helpers."""
-
-
-@completion.command("export")
-@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
-@click.option("--shell", type=click.Choice(["bash", "zsh", "fish"]), default="zsh", show_default=True)
-@pass_app
-def completion_export(app: AppContext, output_file: Path, shell: str) -> None:
-    script = _completion_script(shell)
-    atomic_write_text(output_file, f"{script}\n")
-    _emit_and_remember(
-        app,
-        "completion export",
-        {
-            "status": "success",
-            "data": {
-                "shell": shell,
-                "saved_to": str(output_file),
-                "script": script,
-            },
-        },
-    )
-
-
-@cli.group()
-def schema() -> None:
-    """Built-in document schema helpers."""
-
-
-@schema.command("show")
-@click.argument("kind", type=click.Choice(["plan", "snapshot", "selection", "workflow", "report"]))
-@click.option("--save-to", type=click.Path(dir_okay=False, path_type=Path), default=None)
-@pass_app
-def schema_show(app: AppContext, kind: str, save_to: Path | None) -> None:
-    document = _schema_document(kind)
-    if save_to is not None:
-        atomic_write_json(save_to, document)
-    _emit_and_remember(
-        app,
-        "schema show",
-        {
-            "status": "success",
-            "data": {
-                "kind": kind,
-                "saved_to": str(save_to) if save_to is not None else None,
-                "schema": document,
             },
         },
     )
@@ -6861,6 +5861,61 @@ def _snapshot_summary(document: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _bridge_status_payload() -> dict[str, Any]:
+    summary = bridge_health()
+    return {
+        "plugin_id": BRIDGE_PLUGIN_ID,
+        "plugin_name": BRIDGE_PLUGIN_NAME,
+        "template_dir": summary["template_dir"],
+        "template_exists": summary["template_exists"],
+        "state_dir": summary["layout"]["state_dir"],
+        "request_dir": summary["layout"]["requests"],
+        "response_dir": summary["layout"]["responses"],
+        "processed_dir": summary["layout"]["processed"],
+        "status_path": summary["status_path"],
+        "installed_plugin_paths": summary["installed_plugin_paths"],
+        "default_plugin_dirs": summary["default_plugin_dirs"],
+        "health": summary["health"],
+        "heartbeat_age_seconds": summary["heartbeat_age_seconds"],
+        "queue_depth": summary["queue_depth"],
+        "pending_request_count": summary["pending_request_count"],
+        "pending_response_count": summary["pending_response_count"],
+        "processed_count": summary["processed_count"],
+        "writable": summary["writable"],
+        "status_error": summary["status_error"],
+        "plugin_version": summary["plugin_version"],
+        "cli_version": __version__,
+        "version_mismatch": bool(summary["plugin_version"]) and summary["plugin_version"] != __version__,
+        "status": summary["status"],
+    }
+
+
+def _bridge_suggestions(summary: dict[str, Any], ping: dict[str, Any] | None) -> list[str]:
+    suggestions: list[str] = []
+    if not summary.get("installed_plugin_paths"):
+        suggestions.append("Run `bridge install-plugin` to copy the companion plugin into Eagle's plugins folder.")
+    elif summary.get("health") != "healthy":
+        suggestions.append("Restart Eagle, then rerun `bridge ping` or `bridge doctor` to refresh the heartbeat.")
+    if summary.get("status") is None and not summary.get("status_error"):
+        suggestions.append("Open Eagle once so the companion plugin can publish its bridge status file.")
+    if summary.get("queue_depth", 0) > 0:
+        suggestions.append("Inspect the backlog with `bridge status` and prune stale files with `bridge cleanup --dry-run` if needed.")
+    if ping is not None and ping.get("status") in {"timeout", "error"}:
+        suggestions.append("If ping still fails, reinstall the companion plugin and restart Eagle.")
+    return suggestions
+
+
+def _bridge_ping_probe(base_url: str, *, timeout_seconds: float) -> dict[str, Any]:
+    try:
+        return _bridge_request("ping", {"base_url": base_url}, timeout_seconds=timeout_seconds, queue_only=False)
+    except click.ClickException as exc:
+        message = str(exc)
+        return {
+            "status": "timeout" if "Timed out waiting" in message else "error",
+            "error": message,
+        }
+
+
 def _bridge_request(
     action: str,
     payload: dict[str, Any],
@@ -6882,13 +5937,26 @@ def _bridge_request(
 
     response = wait_for_bridge_response(request["request_id"], timeout_seconds=timeout_seconds)
     if response is None:
-        status = load_bridge_status()
-        detail = ""
-        if status is not None:
-            detail = f" Last bridge heartbeat: {status.get('updatedAt', 'unknown')}."
+        summary = _bridge_status_payload()
+        detail_parts = [f"Request file: {request['request_path']}."]
+        heartbeat_age = summary.get("heartbeat_age_seconds")
+        if not summary.get("installed_plugin_paths"):
+            detail_parts.append("Bridge plugin is not installed; run `bridge install-plugin`.")
+        elif summary.get("health") != "healthy":
+            detail_parts.append("Bridge plugin appears installed but is not healthy; restart Eagle and rerun `bridge doctor`.")
+        if heartbeat_age is not None:
+            detail_parts.append(f"Heartbeat age: {heartbeat_age:.1f}s.")
+        elif summary.get("status_error"):
+            detail_parts.append(f"Status file error: {summary.get('status_error')}.")
+        elif summary.get("status") is None:
+            detail_parts.append("No bridge status file has been written yet.")
+        if summary.get("pending_request_count"):
+            detail_parts.append(f"Pending requests: {summary.get('pending_request_count')}.")
+        if summary.get("pending_response_count"):
+            detail_parts.append(f"Pending responses: {summary.get('pending_response_count')}.")
         raise click.ClickException(
             f"Timed out waiting for the Eagle bridge plugin to process '{action}'. "
-            f"Use `bridge status` and `bridge install-plugin` if needed.{detail}"
+            f"{' '.join(detail_parts)} Use `bridge doctor`, `bridge status`, and `bridge install-plugin` if needed."
         )
     if response.get("status") == "error":
         raise click.ClickException(f"Bridge request '{action}' failed: {response.get('error', 'unknown error')}")

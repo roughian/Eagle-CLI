@@ -6,6 +6,12 @@ queued bridge requests from `cli-anything-eagle`.
 Supported bridge actions:
 
 - `ping`
+- `get_context`
+- `select_items`
+- `open_folder`
+- `open_items`
+- `rename_tag`
+- `merge_tags`
 - `rename_items`
 - `move_items`
 
@@ -26,6 +32,8 @@ cli-anything-eagle --json bridge status
 ```
 
 If Eagle is already running, restart Eagle after installing the plugin so the
-service bridge can start and begin answering `bridge ping`, `item rename-bulk`,
-`item move-bulk`, and `snapshot restore --restore-names/--restore-folders`
-requests.
+service bridge can start and begin answering `bridge ping`, `bridge context`,
+`item selected`, `item select`, `item open`, `folder selected`, `folder open`,
+`tag rename-live`, `tag merge-live`, `item rename-bulk`, `item move-bulk`,
+`bridge open-folder`, `bridge select-items`, and
+`snapshot restore --restore-names/--restore-folders` requests.

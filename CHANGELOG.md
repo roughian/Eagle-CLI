@@ -2,6 +2,12 @@
 
 This changelog summarizes the releases already reflected in the repository history and documentation.
 
+## 0.12.0
+- Expanded the companion plugin with item-open and tag-rename/tag-merge bridge actions, plus safer atomic writes for plugin status and responses.
+- Added plugin-backed `item selected`, `item open`, `folder selected`, `tag rename-live`, and `tag merge-live` commands so Eagle UI state can be inspected and controlled directly from the CLI.
+- Updated `bridge install-plugin` to refresh every detected Eagle plugins directory when no explicit target is given, reducing stale duplicate installs.
+- Broadened test coverage around plugin-backed context, open, and live tag operations.
+
 ## 0.11.0
 - Added bridge health summaries that expose heartbeat age, queue depth, writability, and plugin-version mismatch information through `bridge status`.
 - Added `bridge doctor` and `bridge cleanup` so the external CLI can diagnose stale plugin installs and prune old bridge state without touching the plugin code.

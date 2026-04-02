@@ -10,9 +10,9 @@ saved selection sets, reusable reports, declarative workflows, manifest-driven
 ingestion, incremental import watching, plan merge/filter/split/validate
 tooling, shell-completion helpers, document schemas, persistent config defaults,
 dashboard reports, high-level organize flows,
-and a companion bridge plugin for name and folder operations that are not
-available through the local HTTP API alone, plus bridge health diagnostics and
-cleanup helpers.
+and a companion bridge plugin for selection, open, tag, name, and folder
+operations that are not available through the local HTTP API alone, plus bridge
+health diagnostics and cleanup helpers.
 
 ## Requirements
 
@@ -70,6 +70,8 @@ cli-anything-eagle report dashboard ./reports/dashboard.md --format md --all
 cli-anything-eagle --json workflow validate ./workflow.yml
 cli-anything-eagle --json bridge status
 cli-anything-eagle --json bridge doctor --skip-ping
+cli-anything-eagle --json item selected
+cli-anything-eagle --json folder selected
 ```
 
 ## Useful Workflows
@@ -226,6 +228,11 @@ cli-anything-eagle bridge install-plugin
 cli-anything-eagle --json bridge status
 cli-anything-eagle --json bridge doctor --skip-ping
 cli-anything-eagle --json --dry-run bridge cleanup --max-age-hours 24
+cli-anything-eagle --json item selected
+cli-anything-eagle --json folder selected
+cli-anything-eagle --dry-run item open --item-id EXAMPLE --window
+cli-anything-eagle --dry-run tag rename-live "Old Tag" "New Tag"
+cli-anything-eagle --dry-run tag merge-live "Legacy Tag" "Canonical Tag"
 cli-anything-eagle --dry-run item rename-bulk --folder-name References --prefix archived-
 cli-anything-eagle --dry-run item move-bulk --tag reviewed --target-folder-path "Archive/Reviewed"
 ```
@@ -298,6 +305,7 @@ Save and compare reusable item selections:
 cli-anything-eagle select save review-set --keyword review --all
 cli-anything-eagle select sample review-set --count 10 --resolve
 cli-anything-eagle select diff review-set archived-set
+cli-anything-eagle select save-current live-selection
 ```
 
 Generate reusable reports and workflow plans:
@@ -342,9 +350,10 @@ cli-anything-eagle config unset completion_shell
 - `library info`, `history`, `switch`, `icon`, `summary`, `quick-access`
 - `smart-folder list`, `tree`, `show`, `rules`, `audit`, `run`
 - `tag stats`, `audit`, `rename`, `normalize`, `alias-map-apply`
+- `tag rename-live`, `merge-live`
 - `tag-group list`, `show`
-- `folder list`, `tree`, `find`, `recent`, `create`, `ensure`, `ensure-path`, `rename`, `update`
-- `item list`, `export`, `stats`, `info`, `thumbnail`, `update`, `bulk-update`, `rename-bulk`, `move-bulk`
+- `folder list`, `tree`, `find`, `selected`, `open`, `recent`, `create`, `ensure`, `ensure-path`, `rename`, `update`
+- `item list`, `selected`, `select`, `open`, `export`, `stats`, `info`, `thumbnail`, `update`, `bulk-update`, `rename-bulk`, `move-bulk`
 - `item add-path`, `add-paths`, `add-dir`, `add-url`, `add-urls`, `add-bookmark`
 - `item trash`, `refresh-palette`, `refresh-thumbnail`
 - `select list`, `save`, `show`, `delete`, `sample`, `diff`
@@ -354,7 +363,7 @@ cli-anything-eagle config unset completion_shell
 - `snapshot create`, `show`, `diff`, `restore`
 - `audit duplicates`, `cleanup`, `cleanup-plan`, `dedupe-plan`
 - `organize apply`
-- `bridge status`, `doctor`, `cleanup`, `export-plugin`, `install-plugin`, `ping`
+- `bridge status`, `doctor`, `context`, `open-folder`, `select-items`, `cleanup`, `export-plugin`, `install-plugin`, `ping`
 - `workflow validate`, `run`
 - `ingest manifest`
 - `watch import-dir`
@@ -397,11 +406,15 @@ cli-anything-eagle config unset completion_shell
   companion bridge plugin when names or folder assignments must change through
   Eagle's Plugin API instead of the local HTTP API.
 - `bridge install-plugin` copies the bundled service plugin into Eagle's plugin
-  directory. If Eagle is already open, restart it once so the background bridge
-  can start.
+  directory. When no explicit plugin directory is passed, it now refreshes all
+  detected Eagle plugin roots. If Eagle is already open, restart it once so the
+  background bridge can start.
 - `bridge status` and `bridge doctor` now summarize heartbeat freshness, queue
   backlog, writable bridge directories, and whether the installed plugin build
   matches the current CLI version.
+- `item selected` and `folder selected` read the current Eagle UI selection
+  through the companion plugin. `item open`, `tag rename-live`, and
+  `tag merge-live` also require the plugin bridge to be active.
 - `bridge cleanup` only removes old bridge request/response artifacts. Use
   `--dry-run` first if you want to preview which files would be pruned.
 - Mutating commands support `--dry-run`, which is useful when sharing the CLI

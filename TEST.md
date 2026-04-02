@@ -20,6 +20,7 @@
 - Validate incremental watch planning plus shell-completion and schema helpers.
 - Validate persistent config defaults and combined dashboard reporting.
 - Validate bridge health summaries, doctor output, and cleanup dry runs.
+- Validate plugin-backed selection reads, item opening, and live tag actions.
 - Run a small live smoke check separately against read-only endpoints only.
 
 ## Commands
@@ -76,6 +77,11 @@ python3 -m cli_anything.eagle.eagle_cli --json bridge export-plugin ./bridge-plu
 python3 -m cli_anything.eagle.eagle_cli --json bridge status
 python3 -m cli_anything.eagle.eagle_cli --json bridge doctor --skip-ping
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run bridge cleanup --max-age-hours 0
+python3 -m cli_anything.eagle.eagle_cli --json item selected
+python3 -m cli_anything.eagle.eagle_cli --json folder selected
+python3 -m cli_anything.eagle.eagle_cli --json --dry-run item open --item-id EXAMPLE --window
+python3 -m cli_anything.eagle.eagle_cli --json --dry-run tag rename-live "Old Tag" "New Tag"
+python3 -m cli_anything.eagle.eagle_cli --json --dry-run tag merge-live "Legacy Tag" "Canonical Tag"
 python3 -m cli_anything.eagle.eagle_cli --json item list --limit 2 --keyword CleanShot
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run item bulk-update --last --add-tag reviewed
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run item bulk-update --item-file ./items.json --add-tag reviewed
@@ -96,7 +102,7 @@ python3 -m cli_anything.eagle.eagle_cli report dashboard --help
 
 ## Result
 
-- `python3 -m unittest discover -s tests -v` passed with 69 tests.
+- `python3 -m unittest discover -s tests -v` passed with 78 tests.
 - Live smoke checks passed for:
   - `cli-anything-eagle --json doctor`
   - `cli-anything-eagle --json app info`
@@ -104,6 +110,8 @@ python3 -m cli_anything.eagle.eagle_cli report dashboard --help
   - `cli-anything-eagle --json bridge status`
   - `cli-anything-eagle --json bridge doctor --skip-ping`
   - `cli-anything-eagle --json --dry-run bridge cleanup --max-age-hours 0`
+  - `cli-anything-eagle --json item selected`
+  - `cli-anything-eagle --json folder selected`
   - `cli-anything-eagle --json smart-folder audit`
   - `cli-anything-eagle --json smart-folder rules --name "대화 jpg"`
   - `cli-anything-eagle --json smart-folder run --name "대화 jpg"`

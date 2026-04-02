@@ -613,6 +613,255 @@ class EagleCliTests(unittest.TestCase):
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_bridge_context_flattens_plugin_response(self, mock_bridge_request, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-1",
+                "response": {
+                    "status": "success",
+                    "data": {
+                        "item_limit": 5,
+                        "selected_item_count": 2,
+                        "selected_folder_count": 1,
+                        "truncated_items": False,
+                        "selected_items": [{"id": "a", "name": "Alpha"}],
+                        "selected_folders": [{"id": "root", "name": "Root"}],
+                    },
+                },
+            },
+        }
+        result = self.runner.invoke(cli, ["--json", "bridge", "context", "--item-limit", "5"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["request_id"], "req-1")
+        self.assertEqual(payload["data"]["selected_item_count"], 2)
+        self.assertEqual(payload["data"]["selected_folders"][0]["id"], "root")
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
+    def test_bridge_open_folder_resolves_path_and_calls_bridge(self, mock_folder_list, mock_bridge_request, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_folder_list.return_value = {
+            "status": "success",
+            "data": [{"id": "root", "name": "Root", "children": [{"id": "child", "name": "Child", "children": []}]}],
+        }
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-folder",
+                "response": {"status": "success", "data": {"opened": True, "folder_id": "child"}},
+            },
+        }
+        result = self.runner.invoke(cli, ["--json", "bridge", "open-folder", "--folder-path", "Root/Child"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["folder"]["id"], "child")
+        self.assertEqual(mock_bridge_request.call_args.args[0], "open_folder")
+        self.assertEqual(mock_bridge_request.call_args.args[1], {"folder_id": "child"})
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    def test_bridge_select_items_sends_resolved_item_ids(self, mock_item_info, mock_bridge_request, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_info.side_effect = [
+            {"status": "success", "data": {"id": "abc", "name": "A"}},
+            {"status": "success", "data": {"id": "def", "name": "B"}},
+        ]
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-select",
+                "response": {
+                    "status": "success",
+                    "data": {"selected": True, "selected_count": 2, "item_ids": ["abc", "def"]},
+                },
+            },
+        }
+        result = self.runner.invoke(cli, ["--json", "bridge", "select-items", "--item-id", "abc", "--item-id", "def"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["matched_count"], 2)
+        self.assertEqual(payload["data"]["selected_count"], 2)
+        self.assertEqual(mock_bridge_request.call_args.args[0], "select_items")
+        self.assertEqual(mock_bridge_request.call_args.args[1], {"item_ids": ["abc", "def"]})
+
+    @patch("cli_anything.eagle.eagle_cli.DEFAULT_STATE_DIR", Path(".state"))
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_select_save_current_persists_bridge_selection(self, mock_bridge_request, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-current",
+                "response": {
+                    "status": "success",
+                    "data": {
+                        "selected_item_count": 2,
+                        "selected_folder_count": 1,
+                        "truncated_items": False,
+                        "selected_items": [{"id": "a"}, {"id": "b"}],
+                        "selected_folders": [{"id": "root"}],
+                    },
+                },
+            },
+        }
+        with self.runner.isolated_filesystem():
+            result = self.runner.invoke(cli, ["--json", "select", "save-current", "active"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            with open(".state/selections/active.json", "r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["item_count"], 2)
+        self.assertEqual(saved["item_ids"], ["a", "b"])
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_item_selected_reads_bridge_context(self, mock_bridge_request, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-items",
+                "response": {
+                    "status": "success",
+                    "data": {
+                        "selected_item_count": 2,
+                        "truncated_items": False,
+                        "selected_items": [{"id": "a", "name": "Alpha"}, {"id": "b", "name": "Beta"}],
+                    },
+                },
+            },
+        }
+        result = self.runner.invoke(cli, ["--json", "item", "selected", "--item-limit", "5"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["selected_item_count"], 2)
+        self.assertEqual(payload["data"]["items"][1]["id"], "b")
+        mock_bridge_request.assert_called_once_with("get_context", {"item_limit": 5}, timeout_seconds=15.0, queue_only=False)
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_folder_selected_resolves_paths_from_bridge_context(self, mock_bridge_request, mock_folder_list, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_folder_list.return_value = {
+            "status": "success",
+            "data": [{"id": "root", "name": "Root", "children": [{"id": "child", "name": "Child", "children": []}]}],
+        }
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-folders",
+                "response": {
+                    "status": "success",
+                    "data": {
+                        "selected_folder_count": 1,
+                        "selected_folders": [{"id": "child", "name": "Child", "parent": "root"}],
+                    },
+                },
+            },
+        }
+        result = self.runner.invoke(cli, ["--json", "folder", "selected"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["folders"][0]["path"], "Root/Child")
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_item_open_calls_bridge_with_selected_ids(self, mock_bridge_request, mock_item_info, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_info.return_value = {"status": "success", "data": {"id": "abc", "name": "Sample"}}
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-open",
+                "response": {"status": "success", "data": {"opened": True, "opened_count": 1}},
+            },
+        }
+        result = self.runner.invoke(cli, ["--json", "item", "open", "--item-id", "abc", "--window"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["matched_count"], 1)
+        mock_bridge_request.assert_called_once_with(
+            "open_items",
+            {"item_ids": ["abc"], "window": True},
+            timeout_seconds=15.0,
+            queue_only=False,
+        )
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_tag_rename_live_calls_bridge(self, mock_bridge_request, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {"request_id": "req-tag-rename", "response": {"status": "success", "data": {"renamed": True}}},
+        }
+        result = self.runner.invoke(cli, ["--json", "tag", "rename-live", "Old", "New"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["source"], "Old")
+        mock_bridge_request.assert_called_once_with(
+            "rename_tag",
+            {"source": "Old", "target": "New"},
+            timeout_seconds=15.0,
+            queue_only=False,
+        )
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_tag_merge_live_calls_bridge(self, mock_bridge_request, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {"request_id": "req-tag-merge", "response": {"status": "success", "data": {"affectedItems": 3}}},
+        }
+        result = self.runner.invoke(cli, ["--json", "tag", "merge-live", "Legacy", "Canonical"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["target"], "Canonical")
+        mock_bridge_request.assert_called_once_with(
+            "merge_tags",
+            {"source": "Legacy", "target": "Canonical"},
+            timeout_seconds=15.0,
+            queue_only=False,
+        )
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
     @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
     def test_item_bulk_update_rejects_over_max_items(self, mock_item_list, mock_load, _mock_save):
         from cli_anything.eagle.core.state import SessionState

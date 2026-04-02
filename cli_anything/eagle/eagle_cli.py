@@ -690,6 +690,112 @@ def bridge_doctor(app: AppContext, timeout: float, skip_ping: bool) -> None:
     )
 
 
+@bridge.command("context")
+@click.option("--item-limit", type=click.IntRange(1, None), default=20, show_default=True, help="Maximum number of selected items to return.")
+@click.option("--timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@pass_app
+def bridge_context(app: AppContext, item_limit: int, timeout: float) -> None:
+    bridge_result = _bridge_request("get_context", {"item_limit": item_limit}, timeout_seconds=timeout, queue_only=False)
+    payload = _bridge_response_data(bridge_result)
+    _emit_and_remember(
+        app,
+        "bridge context",
+        {
+            "status": "success",
+            "data": {
+                **bridge_result["data"],
+                **payload,
+            },
+        },
+    )
+
+
+@bridge.command("open-folder")
+@click.option("--folder-id", default=None, help="Folder ID.")
+@click.option("--folder-name", default=None, help="Exact folder name.")
+@click.option("--folder-path", default=None, help="Exact folder path.")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
+@pass_app
+def bridge_open_folder(
+    app: AppContext,
+    folder_id: str | None,
+    folder_name: str | None,
+    folder_path: str | None,
+    bridge_timeout: float,
+    queue_only: bool,
+) -> None:
+    target = _resolve_folder_selector(
+        app,
+        folder_id=folder_id,
+        folder_name=folder_name,
+        folder_path=folder_path,
+        purpose="folder",
+        required=True,
+    )
+    if app.dry_run:
+        _emit_and_remember(app, "bridge open-folder", {"status": "dry-run", "data": {"folder": _folder_row(target)}})
+        return
+    bridge_result = _bridge_request(
+        "open_folder",
+        {"folder_id": target.id},
+        timeout_seconds=bridge_timeout,
+        queue_only=queue_only,
+    )
+    _emit_and_remember(
+        app,
+        "bridge open-folder",
+        {
+            "status": bridge_result.get("status", "success"),
+            "data": {
+                "folder": _folder_row(target),
+                **bridge_result["data"],
+                "response": _bridge_response_data(bridge_result),
+            },
+        },
+    )
+
+
+@bridge.command("select-items")
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to select in Eagle.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
+@pass_app
+def bridge_select_items(
+    app: AppContext,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    bridge_timeout: float,
+    queue_only: bool,
+) -> None:
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    items = _collect_target_items(
+        app,
+        item_ids=resolved_item_ids,
+        limit=max(len(resolved_item_ids), 1),
+        offset=0,
+        order_by=None,
+        keyword=None,
+        ext=None,
+        tags=(),
+        folders=(),
+        folder_names=(),
+        folder_paths=(),
+    )
+    result = _bridge_select_items_result(
+        app,
+        command_name="bridge select-items",
+        item_ids=[str(item.get("id")) for item in items if str(item.get("id"))],
+        bridge_timeout=bridge_timeout,
+        queue_only=queue_only,
+        extra_data={"matched_count": len(items)},
+    )
+    _emit_and_remember(app, "bridge select-items", result)
+
+
 @bridge.command("export-plugin")
 @click.argument("output_dir", type=click.Path(file_okay=False, path_type=Path))
 @pass_app
@@ -703,20 +809,21 @@ def bridge_export_plugin(app: AppContext, output_dir: Path) -> None:
 @pass_app
 def bridge_install_plugin(app: AppContext, plugin_dir: Path | None) -> None:
     candidates = default_plugin_dir_candidates()
-    target_root = plugin_dir
-    if target_root is None:
-        target_root = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
-    installed_path = install_companion_plugin(target_root)
+    target_roots = [plugin_dir] if plugin_dir is not None else [candidate for candidate in candidates if candidate.exists()]
+    if not target_roots:
+        target_roots = [candidates[0]]
+    installed_paths = [install_companion_plugin(target_root) for target_root in target_roots]
     _emit_and_remember(
         app,
         "bridge install-plugin",
         {
             "status": "success",
             "data": {
-                "installed_to": str(installed_path),
-                "plugin_root": str(target_root),
+                "installed_to": str(installed_paths[0]),
+                "plugin_root": str(target_roots[0]),
+                "installed_to_all": [str(path) for path in installed_paths],
                 "plugin_id": BRIDGE_PLUGIN_ID,
-                "installed_plugin_paths": [str(path) for path in installed_plugin_paths([target_root])],
+                "installed_plugin_paths": [str(path) for path in installed_paths],
                 "restart_required": True,
             },
         },
@@ -730,6 +837,173 @@ def bridge_install_plugin(app: AppContext, plugin_dir: Path | None) -> None:
 def bridge_ping(app: AppContext, timeout: float, queue_only: bool) -> None:
     result = _bridge_request("ping", {"base_url": app.base_url}, timeout_seconds=timeout, queue_only=queue_only)
     _emit_and_remember(app, "bridge ping", result)
+
+
+@bridge.command("context")
+@click.option("--timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--item-limit", type=click.IntRange(1, None), default=20, show_default=True, help="Maximum selected item rows to return from Eagle.")
+@click.option("--queue-only", is_flag=True, help="Queue the context request without waiting for a response.")
+@pass_app
+def bridge_context(app: AppContext, timeout: float, item_limit: int, queue_only: bool) -> None:
+    result = _bridge_request("get_context", {"item_limit": item_limit}, timeout_seconds=timeout, queue_only=queue_only)
+    if result.get("status") != "success":
+        _emit_and_remember(app, "bridge context", result)
+        return
+    payload = _bridge_response_data(result)
+    _emit_and_remember(
+        app,
+        "bridge context",
+        {
+            "status": "success",
+            "data": {
+                "request_id": result["data"]["request_id"],
+                **payload,
+            },
+        },
+    )
+
+
+@bridge.command("open-folder")
+@click.option("--folder-id", default=None, help="Open this exact folder ID inside Eagle.")
+@click.option("--folder-name", default=None, help="Resolve and open an exact folder name.")
+@click.option("--folder-path", default=None, help="Resolve and open an exact folder path.")
+@click.option("--timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the folder-open request without waiting for a response.")
+@pass_app
+def bridge_open_folder(
+    app: AppContext,
+    folder_id: str | None,
+    folder_name: str | None,
+    folder_path: str | None,
+    timeout: float,
+    queue_only: bool,
+) -> None:
+    folder = _resolve_folder_selector(
+        app,
+        folder_id=folder_id,
+        folder_name=folder_name,
+        folder_path=folder_path,
+        purpose="folder",
+        required=True,
+    )
+    result = _bridge_request("open_folder", {"folder_id": folder.id}, timeout_seconds=timeout, queue_only=queue_only)
+    if result.get("status") != "success":
+        _emit_and_remember(
+            app,
+            "bridge open-folder",
+            {
+                "status": result["status"],
+                "data": {
+                    "folder": _folder_row(folder),
+                    **result["data"],
+                },
+            },
+        )
+        return
+    payload = _bridge_response_data(result)
+    _emit_and_remember(
+        app,
+        "bridge open-folder",
+        {
+            "status": "success",
+            "data": {
+                "request_id": result["data"]["request_id"],
+                "folder": _folder_row(folder),
+                **payload,
+            },
+        },
+    )
+
+
+@bridge.command("select-items")
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to select inside Eagle.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--max-items", type=click.IntRange(1, None), default=None, help="Refuse to select more than this many items.")
+@click.option("--timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the selection request without waiting for a response.")
+@item_filter_options
+@pass_app
+def bridge_select_items(
+    app: AppContext,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    max_items: int | None,
+    timeout: float,
+    queue_only: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    items = _collect_target_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    matched_count = _apply_item_guardrails(items, max_items=max_items, require_match=None, save_matches=None)
+    selected_ids = [str(item.get("id")) for item in items if str(item.get("id"))]
+    if not selected_ids:
+        raise click.ClickException("No items matched the requested selection.")
+    result = _bridge_request("select_items", {"item_ids": selected_ids}, timeout_seconds=timeout, queue_only=queue_only)
+    if result.get("status") != "success":
+        _emit_and_remember(
+            app,
+            "bridge select-items",
+            {
+                "status": result["status"],
+                "data": {
+                    "matched_count": matched_count,
+                    "sample_ids": selected_ids[:20],
+                    **result["data"],
+                },
+            },
+        )
+        return
+    payload = _bridge_response_data(result)
+    _emit_and_remember(
+        app,
+        "bridge select-items",
+        {
+            "status": "success",
+            "data": {
+                "request_id": result["data"]["request_id"],
+                "matched_count": matched_count,
+                "sample_ids": selected_ids[:20],
+                **payload,
+            },
+        },
+    )
 
 
 @bridge.command("cleanup")
@@ -1442,6 +1716,91 @@ def folder_find(app: AppContext, query: str, exact: bool) -> None:
     _emit_and_remember(app, "folder find", {"status": "success", "data": [_folder_row(item) for item in matches]})
 
 
+@folder.command("selected")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@pass_app
+def folder_selected(app: AppContext, bridge_timeout: float) -> None:
+    result = _bridge_request("get_context", {"item_limit": 1}, timeout_seconds=bridge_timeout, queue_only=False)
+    payload = _bridge_response_data(result)
+    records_by_id = {record.id: record for record in _folder_records(app)}
+    rows = []
+    for folder in payload.get("selected_folders") or []:
+        row = dict(folder)
+        record = records_by_id.get(str(folder.get("id") or ""))
+        if record is not None:
+            row.update(_folder_row(record) or {})
+        rows.append(row)
+    _emit_and_remember(
+        app,
+        "folder selected",
+        {
+            "status": "success",
+            "data": {
+                "selected_folder_count": payload.get("selected_folder_count", len(rows)),
+                "folders": rows,
+                "bridge": result["data"],
+            },
+        },
+    )
+
+
+@folder.command("open")
+@click.option("--id", "folder_id", default=None, help="Folder ID.")
+@click.option("--name", "folder_name", default=None, help="Exact folder name.")
+@click.option("--path", "folder_path", default=None, help="Exact folder path.")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
+@pass_app
+def folder_open(
+    app: AppContext,
+    folder_id: str | None,
+    folder_name: str | None,
+    folder_path: str | None,
+    bridge_timeout: float,
+    queue_only: bool,
+) -> None:
+    target = _resolve_folder_selector(
+        app,
+        folder_id=folder_id,
+        folder_name=folder_name,
+        folder_path=folder_path,
+        purpose="folder",
+        required=True,
+    )
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "folder open",
+            {
+                "status": "dry-run",
+                "data": {
+                    "folder": _folder_row(target),
+                    "action": "open_folder",
+                },
+            },
+        )
+        return
+    bridge_result = _bridge_request(
+        "open_folder",
+        {"folder_id": target.id},
+        timeout_seconds=bridge_timeout,
+        queue_only=queue_only,
+    )
+    payload = _bridge_response_data(bridge_result)
+    _emit_and_remember(
+        app,
+        "folder open",
+        {
+            "status": bridge_result.get("status", "success"),
+            "data": {
+                "folder": _folder_row(target),
+                "bridge": bridge_result["data"],
+                "response": payload,
+            },
+        },
+    )
+
+
 @folder.command("recent")
 @pass_app
 def folder_recent(app: AppContext) -> None:
@@ -1650,6 +2009,221 @@ def item_list(
         folder_paths=folder_paths,
     )
     _emit_and_remember(app, "item list", {"status": "success", "data": query["items"]})
+
+
+@item.command("selected")
+@click.option("--item-limit", type=click.IntRange(1, None), default=20, show_default=True, help="Maximum selected item rows to return from Eagle.")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@pass_app
+def item_selected(app: AppContext, item_limit: int, bridge_timeout: float) -> None:
+    result = _bridge_request("get_context", {"item_limit": item_limit}, timeout_seconds=bridge_timeout, queue_only=False)
+    payload = _bridge_response_data(result)
+    _emit_and_remember(
+        app,
+        "item selected",
+        {
+            "status": "success",
+            "data": {
+                "selected_item_count": payload.get("selected_item_count", len(payload.get("selected_items") or [])),
+                "truncated_items": payload.get("truncated_items", False),
+                "items": payload.get("selected_items") or [],
+                "bridge": result["data"],
+            },
+        },
+    )
+
+
+@item.command("select")
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to select in Eagle.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--max-items", type=click.IntRange(1, None), default=None, help="Refuse to continue if more than this many items match.")
+@click.option("--require-match", type=click.IntRange(1, None), default=None, help="Require at least this many matched items.")
+@click.option("--save-matches", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write matched items to a file before selecting them.")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
+@item_filter_options
+@pass_app
+def item_select(
+    app: AppContext,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    max_items: int | None,
+    require_match: int | None,
+    save_matches: Path | None,
+    bridge_timeout: float,
+    queue_only: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    items = _collect_target_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    matched_count = _apply_item_guardrails(items, max_items=max_items, require_match=require_match, save_matches=save_matches)
+    result = _bridge_select_items_result(
+        app,
+        command_name="item select",
+        item_ids=[str(item.get("id")) for item in items if str(item.get("id"))],
+        bridge_timeout=bridge_timeout,
+        queue_only=queue_only,
+        extra_data={
+            "matched_count": matched_count,
+            "saved_matches": str(save_matches) if save_matches is not None else None,
+            "selector": _item_selector_context(
+                item_ids=resolved_item_ids,
+                fetch_all=fetch_all,
+                limit=limit,
+                offset=offset,
+                order_by=order_by,
+                keyword=keyword,
+                ext=ext,
+                tags=tags,
+                folders=folders,
+                folder_names=folder_names,
+                folder_paths=folder_paths,
+            ),
+        },
+    )
+    _emit_and_remember(app, "item select", result)
+
+
+@item.command("open")
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to open inside Eagle.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--window", is_flag=True, help="Ask Eagle to open each item in a new window when supported.")
+@click.option("--max-items", type=click.IntRange(1, None), default=None, help="Refuse to continue if more than this many items match.")
+@click.option("--require-match", type=click.IntRange(1, None), default=None, help="Require at least this many matched items.")
+@click.option("--save-matches", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write matched items to a file before opening them.")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
+@item_filter_options
+@pass_app
+def item_open(
+    app: AppContext,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    window: bool,
+    max_items: int | None,
+    require_match: int | None,
+    save_matches: Path | None,
+    bridge_timeout: float,
+    queue_only: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    items = _collect_target_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    matched_count = _apply_item_guardrails(items, max_items=max_items, require_match=require_match, save_matches=save_matches)
+    selected_ids = [str(item.get("id")) for item in items if str(item.get("id"))]
+    if not selected_ids:
+        raise click.ClickException("No items matched the requested selection.")
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "item open",
+            {
+                "status": "dry-run",
+                "data": {
+                    "matched_count": matched_count,
+                    "window": window,
+                    "sample_ids": selected_ids[:20],
+                    "saved_matches": str(save_matches) if save_matches is not None else None,
+                },
+            },
+        )
+        return
+    bridge_result = _bridge_request(
+        "open_items",
+        {"item_ids": selected_ids, "window": window},
+        timeout_seconds=bridge_timeout,
+        queue_only=queue_only,
+    )
+    payload = _bridge_response_data(bridge_result)
+    _emit_and_remember(
+        app,
+        "item open",
+        {
+            "status": bridge_result.get("status", "success"),
+            "data": {
+                "matched_count": matched_count,
+                "window": window,
+                "sample_ids": selected_ids[:20],
+                "saved_matches": str(save_matches) if save_matches is not None else None,
+                "bridge": bridge_result["data"],
+                "response": payload,
+            },
+        },
+    )
 
 
 @item.command("export")
@@ -3873,6 +4447,92 @@ def tag_audit(
     _emit_and_remember(app, "tag audit", {"status": "success", "data": payload})
 
 
+@tag.command("rename-live")
+@click.argument("source")
+@click.argument("target")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
+@pass_app
+def tag_rename_live(app: AppContext, source: str, target: str, bridge_timeout: float, queue_only: bool) -> None:
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "tag rename-live",
+            {
+                "status": "dry-run",
+                "data": {
+                    "source": source,
+                    "target": target,
+                    "action": "rename_tag",
+                },
+            },
+        )
+        return
+    bridge_result = _bridge_request(
+        "rename_tag",
+        {"source": source, "target": target},
+        timeout_seconds=bridge_timeout,
+        queue_only=queue_only,
+    )
+    payload = _bridge_response_data(bridge_result)
+    _emit_and_remember(
+        app,
+        "tag rename-live",
+        {
+            "status": bridge_result.get("status", "success"),
+            "data": {
+                "source": source,
+                "target": target,
+                "bridge": bridge_result["data"],
+                "response": payload,
+            },
+        },
+    )
+
+
+@tag.command("merge-live")
+@click.argument("source")
+@click.argument("target")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
+@pass_app
+def tag_merge_live(app: AppContext, source: str, target: str, bridge_timeout: float, queue_only: bool) -> None:
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "tag merge-live",
+            {
+                "status": "dry-run",
+                "data": {
+                    "source": source,
+                    "target": target,
+                    "action": "merge_tags",
+                },
+            },
+        )
+        return
+    bridge_result = _bridge_request(
+        "merge_tags",
+        {"source": source, "target": target},
+        timeout_seconds=bridge_timeout,
+        queue_only=queue_only,
+    )
+    payload = _bridge_response_data(bridge_result)
+    _emit_and_remember(
+        app,
+        "tag merge-live",
+        {
+            "status": bridge_result.get("status", "success"),
+            "data": {
+                "source": source,
+                "target": target,
+                "bridge": bridge_result["data"],
+                "response": payload,
+            },
+        },
+    )
+
+
 @tag.command("rename")
 @click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to update.")
 @click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
@@ -4359,11 +5019,89 @@ def select_save(
     )
 
 
+@select_group.command("save-current")
+@click.argument("name")
+@click.option("--timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--item-limit", type=click.IntRange(1, None), default=200, show_default=True, help="Maximum selected items to fetch from Eagle before saving the selection.")
+@pass_app
+def select_save_current(app: AppContext, name: str, timeout: float, item_limit: int) -> None:
+    result = _bridge_request("get_context", {"item_limit": item_limit}, timeout_seconds=timeout, queue_only=False)
+    payload = _bridge_response_data(result)
+    selected_items = [item for item in payload.get("selected_items") or [] if isinstance(item, dict)]
+    saved_ids = [str(item.get("id")) for item in selected_items if str(item.get("id"))]
+    if not saved_ids:
+        raise click.ClickException("The Eagle plugin did not report any selected items.")
+    path = _save_selection(
+        name,
+        saved_ids,
+        context={
+            "source": "bridge-current-selection",
+            "request_id": result["data"]["request_id"],
+            "selected_item_count": payload.get("selected_item_count"),
+            "selected_folder_ids": [str(folder.get("id")) for folder in payload.get("selected_folders") or [] if str(folder.get("id"))],
+            "truncated_items": bool(payload.get("truncated_items")),
+        },
+    )
+    _emit_and_remember(
+        app,
+        "select save-current",
+        {
+            "status": "success",
+            "data": {
+                "name": name,
+                "saved_to": str(path),
+                "item_count": len(saved_ids),
+                "selected_item_count": payload.get("selected_item_count", len(saved_ids)),
+                "selected_folder_count": payload.get("selected_folder_count", 0),
+                "truncated_items": bool(payload.get("truncated_items")),
+                "sample_ids": saved_ids[:10],
+            },
+        },
+    )
+
+
 @select_group.command("show")
 @click.argument("name")
 @pass_app
 def select_show(app: AppContext, name: str) -> None:
     _emit_and_remember(app, "select show", {"status": "success", "data": _load_selection(name)})
+
+
+@select_group.command("capture")
+@click.argument("name")
+@click.option("--item-limit", type=click.IntRange(1, None), default=50, show_default=True)
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@pass_app
+def select_capture(app: AppContext, name: str, item_limit: int, bridge_timeout: float) -> None:
+    _emit_and_remember(app, "select capture", _save_current_selection_result(app, name=name, item_limit=item_limit, bridge_timeout=bridge_timeout))
+
+
+@select_group.command("save-current")
+@click.argument("name")
+@click.option("--item-limit", type=click.IntRange(1, None), default=50, show_default=True)
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@pass_app
+def select_save_current(app: AppContext, name: str, item_limit: int, bridge_timeout: float) -> None:
+    _emit_and_remember(app, "select save-current", _save_current_selection_result(app, name=name, item_limit=item_limit, bridge_timeout=bridge_timeout))
+
+
+@select_group.command("apply")
+@click.argument("name")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
+@pass_app
+def select_apply(app: AppContext, name: str, bridge_timeout: float, queue_only: bool) -> None:
+    payload = _load_selection(name)
+    item_ids = [str(item_id) for item_id in payload.get("item_ids") or [] if str(item_id)]
+    result = _bridge_select_items_result(
+        app,
+        command_name="select apply",
+        item_ids=item_ids,
+        bridge_timeout=bridge_timeout,
+        queue_only=queue_only,
+        extra_data={"name": name},
+    )
+    _emit_and_remember(app, "select apply", result)
 
 
 @select_group.command("delete")
@@ -5905,6 +6643,14 @@ def _bridge_suggestions(summary: dict[str, Any], ping: dict[str, Any] | None) ->
     return suggestions
 
 
+def _bridge_response_data(result: dict[str, Any]) -> dict[str, Any]:
+    if result.get("status") != "success":
+        return {}
+    response = (result.get("data") or {}).get("response") or {}
+    data = response.get("data")
+    return data if isinstance(data, dict) else {}
+
+
 def _bridge_ping_probe(base_url: str, *, timeout_seconds: float) -> dict[str, Any]:
     try:
         return _bridge_request("ping", {"base_url": base_url}, timeout_seconds=timeout_seconds, queue_only=False)
@@ -5914,6 +6660,76 @@ def _bridge_ping_probe(base_url: str, *, timeout_seconds: float) -> dict[str, An
             "status": "timeout" if "Timed out waiting" in message else "error",
             "error": message,
         }
+
+
+def _bridge_select_items_result(
+    app: AppContext,
+    *,
+    command_name: str,
+    item_ids: list[str],
+    bridge_timeout: float,
+    queue_only: bool,
+    extra_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    unique_ids = list(dict.fromkeys(str(item_id) for item_id in item_ids if str(item_id)))
+    if not unique_ids:
+        raise click.ClickException(f"{command_name} did not resolve any item IDs.")
+    data = {
+        "requested_count": len(unique_ids),
+        "sample_ids": unique_ids[:20],
+        **(extra_data or {}),
+    }
+    if app.dry_run:
+        return {"status": "dry-run", "data": data}
+    bridge_result = _bridge_request(
+        "select_items",
+        {"item_ids": unique_ids},
+        timeout_seconds=bridge_timeout,
+        queue_only=queue_only,
+    )
+    payload = _bridge_response_data(bridge_result)
+    return {
+        "status": bridge_result.get("status", "success"),
+        "data": {
+            **data,
+            "selected_count": payload.get("selected_count", payload.get("requested_count", len(unique_ids))),
+            "bridge": bridge_result["data"],
+            "response": payload,
+        },
+    }
+
+
+def _save_current_selection_result(app: AppContext, *, name: str, item_limit: int, bridge_timeout: float) -> dict[str, Any]:
+    bridge_result = _bridge_request("get_context", {"item_limit": item_limit}, timeout_seconds=bridge_timeout, queue_only=False)
+    payload = _bridge_response_data(bridge_result)
+    item_ids = [str(item.get("id")) for item in payload.get("selected_items") or [] if str(item.get("id"))]
+    if not item_ids:
+        raise click.ClickException("No selected Eagle items were returned by the companion plugin.")
+    data = {
+        "name": name,
+        "item_count": len(item_ids),
+        "sample_ids": item_ids[:10],
+        "selected_folder_count": payload.get("selected_folder_count", 0),
+        "request_id": bridge_result["data"].get("request_id"),
+    }
+    if app.dry_run:
+        return {"status": "dry-run", "data": data}
+    path = _save_selection(
+        name,
+        item_ids,
+        context={
+            "source": "bridge-capture",
+            "selected_folder_count": payload.get("selected_folder_count", 0),
+            "selected_folders": payload.get("selected_folders") or [],
+        },
+    )
+    return {
+        "status": "success",
+        "data": {
+            **data,
+            "saved_to": str(path),
+        },
+    }
 
 
 def _bridge_request(

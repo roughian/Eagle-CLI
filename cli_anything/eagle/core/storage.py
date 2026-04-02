@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from cli_anything.eagle.core.files import atomic_write_json
 from cli_anything.eagle.core.state import DEFAULT_STATE_DIR, LEGACY_STATE_DIR
 
 
@@ -23,8 +24,7 @@ def load_presets(path: Path | None = None) -> dict[str, Any]:
 
 def save_presets(data: dict[str, Any], path: Path | None = None) -> None:
     preset_path = path or PRESETS_PATH
-    preset_path.parent.mkdir(parents=True, exist_ok=True)
-    preset_path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    atomic_write_json(preset_path, data)
 
 
 def get_preset(name: str, path: Path | None = None) -> dict[str, Any] | None:

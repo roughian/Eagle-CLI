@@ -30,6 +30,14 @@ from cli_anything.eagle.core.bridge import (
     wait_for_bridge_response,
 )
 from cli_anything.eagle.core.client import DEFAULT_BASE_URL, EagleApiError, EagleClient
+from cli_anything.eagle.core.config import (
+    config_keys,
+    config_path as config_file_path,
+    load_config,
+    set_config_value,
+    unset_config_value,
+)
+from cli_anything.eagle.core.files import atomic_write_json, atomic_write_text
 from cli_anything.eagle.core.state import DEFAULT_STATE_DIR, SessionState
 from cli_anything.eagle.core.storage import delete_preset, get_preset, load_presets, save_presets, set_preset
 from cli_anything.eagle.utils.folders import (
@@ -60,6 +68,7 @@ FOLDER_COLORS = ["red", "orange", "green", "yellow", "aqua", "blue", "purple", "
 class AppContext:
     client: EagleClient
     state: SessionState
+    config: dict[str, Any]
     json_output: bool
     timeout: float
     base_url: str
@@ -103,13 +112,27 @@ def cli(
 ) -> None:
     """CLI-Anything style Eagle harness."""
     state = SessionState.load()
-    resolved_base_url = base_url or os.environ.get("EAGLE_API_BASE_URL") or state.base_url or DEFAULT_BASE_URL
-    resolved_timeout = timeout or state.timeout or 15.0
+    config = load_config()
+    defaults = config.get("defaults", {})
+    resolved_base_url = (
+        base_url
+        or os.environ.get("EAGLE_API_BASE_URL")
+        or defaults.get("base_url")
+        or state.base_url
+        or DEFAULT_BASE_URL
+    )
+    timeout_value = timeout
+    if timeout_value is None and os.environ.get("EAGLE_API_TIMEOUT"):
+        timeout_value = float(os.environ["EAGLE_API_TIMEOUT"])
+    if timeout_value is None and defaults.get("timeout") is not None:
+        timeout_value = float(defaults["timeout"])
+    resolved_timeout = timeout_value if timeout_value is not None else (state.timeout or 15.0)
 
     client = EagleClient(base_url=resolved_base_url, timeout=resolved_timeout)
     ctx.obj = AppContext(
         client=client,
         state=state,
+        config=defaults,
         json_output=json_output,
         timeout=resolved_timeout,
         base_url=resolved_base_url,
@@ -143,6 +166,95 @@ def doctor(app: AppContext) -> None:
         "details": detection.details,
     }
     _emit_and_remember(app, "doctor", payload)
+
+
+@cli.group()
+def config() -> None:
+    """Persistent configuration commands."""
+
+
+@config.command("path")
+@pass_app
+def config_path_command(app: AppContext) -> None:
+    path = config_file_path()
+    _emit_and_remember(
+        app,
+        "config path",
+        {
+            "status": "success",
+            "data": {
+                "path": str(path),
+                "exists": path.exists(),
+            },
+        },
+    )
+
+
+@config.command("show")
+@click.option("--key", "config_key", type=click.Choice(config_keys()), default=None)
+@pass_app
+def config_show(app: AppContext, config_key: str | None) -> None:
+    document = load_config()
+    defaults = document.get("defaults", {})
+    data: dict[str, Any]
+    if config_key is None:
+        data = {
+            "path": str(config_file_path()),
+            "version": document.get("version", 1),
+            "defaults": defaults,
+        }
+    else:
+        data = {
+            "path": str(config_file_path()),
+            "key": config_key,
+            "value": defaults.get(config_key),
+            "is_set": config_key in defaults,
+        }
+    _emit_and_remember(app, "config show", {"status": "success", "data": data})
+
+
+@config.command("set")
+@click.argument("key", type=click.Choice(config_keys()))
+@click.argument("value")
+@pass_app
+def config_set(app: AppContext, key: str, value: str) -> None:
+    try:
+        normalized = set_config_value(key, value)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    app.config[key] = normalized
+    _emit_and_remember(
+        app,
+        "config set",
+        {
+            "status": "success",
+            "data": {
+                "path": str(config_file_path()),
+                "key": key,
+                "value": normalized,
+            },
+        },
+    )
+
+
+@config.command("unset")
+@click.argument("key", type=click.Choice(config_keys()))
+@pass_app
+def config_unset(app: AppContext, key: str) -> None:
+    removed = unset_config_value(key)
+    app.config.pop(key, None)
+    _emit_and_remember(
+        app,
+        "config unset",
+        {
+            "status": "success",
+            "data": {
+                "path": str(config_file_path()),
+                "key": key,
+                "removed": removed,
+            },
+        },
+    )
 
 
 @cli.group()
@@ -576,8 +688,7 @@ def preset_export(app: AppContext, output_file: Path, names: tuple[str, ...]) ->
         "version": 1,
         "presets": selected,
     }
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    output_file.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    atomic_write_json(output_file, document)
     _emit_and_remember(
         app,
         "preset export",
@@ -1583,7 +1694,7 @@ def item_export(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_format = _write_items_export(output_file, query["items"], export_format)
+    resolved_format = _write_items_export(output_file, query["items"], _effective_export_format(app, export_format))
     _emit_and_remember(
         app,
         "item export",
@@ -3344,7 +3455,7 @@ def report_library(app: AppContext, output_file: Path, report_format: str) -> No
         "title": "CLI-Anything Eagle Library Report",
         **build_library_summary(_library_info_data(app)),
     }
-    resolved_format = _write_report(output_file, document, requested_format=report_format)
+    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
     _emit_and_remember(
         app,
         "report library",
@@ -3421,7 +3532,7 @@ def report_tags(
         "query": query["query"],
         "pages": query["pages"],
     }
-    resolved_format = _write_report(output_file, document, requested_format=report_format)
+    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
     _emit_and_remember(
         app,
         "report tags",
@@ -3498,7 +3609,7 @@ def report_folders(
         "query": query["query"],
         "pages": query["pages"],
     }
-    resolved_format = _write_report(output_file, document, requested_format=report_format)
+    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
     _emit_and_remember(
         app,
         "report folders",
@@ -3580,7 +3691,7 @@ def report_trend(
         "query": query["query"],
         "pages": query["pages"],
     }
-    resolved_format = _write_report(output_file, document, requested_format=report_format)
+    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
     _emit_and_remember(
         app,
         "report trend",
@@ -3590,6 +3701,102 @@ def report_trend(
                 "saved_to": str(output_file),
                 "report_format": resolved_format,
                 **document,
+            },
+        },
+    )
+
+
+@report.command("dashboard")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html"]), default="auto", show_default=True)
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--top", type=click.IntRange(1, None), default=20, show_default=True)
+@click.option("--bucket", type=click.Choice(["month", "year"]), default="month", show_default=True)
+@click.option("--field", type=click.Choice(["created", "modification"]), default="modification", show_default=True)
+@item_filter_options
+@pass_app
+def report_dashboard(
+    app: AppContext,
+    output_file: Path,
+    report_format: str,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    top: int,
+    bucket: str,
+    field: str,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    query = _query_or_collect_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    library_info = _library_info_data(app)
+    trend_rows = _trend_rows(query["items"], bucket=bucket, field=field)
+    document = {
+        "title": "CLI-Anything Eagle Dashboard",
+        "generated_at": _utc_now(),
+        "query": query["query"],
+        "pages": query["pages"],
+        "library": build_library_summary(library_info),
+        "item_summary": _summarize_items(app, query["items"], top=top),
+        "tag_stats": _build_tag_stats(query["items"], top=top),
+        "folder_stats": _build_folder_stats(app, query["items"], top=top),
+        "trend": {
+            "bucket": bucket,
+            "field": field,
+            "rows": trend_rows,
+        },
+        "rows": trend_rows,
+    }
+    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
+    _emit_and_remember(
+        app,
+        "report dashboard",
+        {
+            "status": "success",
+            "data": {
+                "saved_to": str(output_file),
+                "format": resolved_format,
+                "item_count": len(query["items"]),
+                "top": top,
+                "bucket": bucket,
+                "field": field,
             },
         },
     )
@@ -3955,6 +4162,7 @@ def watch_import_dir(
     tag_from_name: bool,
     save_manifest: Path | None,
 ) -> None:
+    state_file = _effective_watch_state_file(app, state_file)
     target_folder = _resolve_folder_selector(
         app,
         folder_id=folder_id,
@@ -4055,8 +4263,7 @@ def completion() -> None:
 @pass_app
 def completion_export(app: AppContext, output_file: Path, shell: str) -> None:
     script = _completion_script(shell)
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    output_file.write_text(f"{script}\n", encoding="utf-8")
+    atomic_write_text(output_file, f"{script}\n")
     _emit_and_remember(
         app,
         "completion export",
@@ -4083,8 +4290,7 @@ def schema() -> None:
 def schema_show(app: AppContext, kind: str, save_to: Path | None) -> None:
     document = _schema_document(kind)
     if save_to is not None:
-        save_to.parent.mkdir(parents=True, exist_ok=True)
-        save_to.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        atomic_write_json(save_to, document)
     _emit_and_remember(
         app,
         "schema show",
@@ -5267,7 +5473,7 @@ def report_library(app: AppContext, output_file: Path, report_format: str) -> No
         **build_library_summary(info),
         "rows": rows,
     }
-    resolved_format = _write_report(output_file, document, requested_format=report_format)
+    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
     _emit_and_remember(
         app,
         "report library",
@@ -5347,7 +5553,7 @@ def report_tags(
         "query": query["query"],
         "pages": query["pages"],
     }
-    resolved_format = _write_report(output_file, document, requested_format=report_format)
+    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
     _emit_and_remember(
         app,
         "report tags",
@@ -5441,7 +5647,7 @@ def report_folders(
         "query": query["query"],
         "pages": query["pages"],
     }
-    resolved_format = _write_report(output_file, document, requested_format=report_format)
+    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
     _emit_and_remember(
         app,
         "report folders",
@@ -5524,7 +5730,7 @@ def report_trend(
         "query": query["query"],
         "pages": query["pages"],
     }
-    resolved_format = _write_report(output_file, document, requested_format=report_format)
+    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
     _emit_and_remember(
         app,
         "report trend",
@@ -5534,6 +5740,101 @@ def report_trend(
                 "saved_to": str(output_file),
                 "format": resolved_format,
                 "row_count": len(rows),
+            },
+        },
+    )
+
+
+@report.command("dashboard")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html"]), default="auto", show_default=True)
+@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
+@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
+@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
+@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@click.option("--top", type=click.IntRange(1, None), default=20, show_default=True)
+@click.option("--bucket", type=click.Choice(["month", "year"]), default="month", show_default=True)
+@click.option("--field", type=click.Choice(["created", "modification"]), default="modification", show_default=True)
+@item_filter_options
+@pass_app
+def report_dashboard(
+    app: AppContext,
+    output_file: Path,
+    report_format: str,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    fetch_all: bool,
+    top: int,
+    bucket: str,
+    field: str,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    query = _query_or_collect_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    trend_rows = _trend_rows(query["items"], bucket=bucket, field=field)
+    document = {
+        "title": "CLI-Anything Eagle Dashboard",
+        "generated_at": _utc_now(),
+        "library": build_library_summary(_library_info_data(app)),
+        "item_summary": _summarize_items(app, query["items"], top=top),
+        "tag_stats": _build_tag_stats(query["items"], top=top),
+        "folder_stats": _build_folder_stats(app, query["items"], top=top),
+        "trend": {
+            "bucket": bucket,
+            "field": field,
+            "rows": trend_rows,
+        },
+        "query": query["query"],
+        "pages": query["pages"],
+        "rows": trend_rows,
+    }
+    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
+    _emit_and_remember(
+        app,
+        "report dashboard",
+        {
+            "status": "success",
+            "data": {
+                "saved_to": str(output_file),
+                "format": resolved_format,
+                "item_count": len(query["items"]),
+                "top": top,
+                "bucket": bucket,
+                "field": field,
             },
         },
     )
@@ -5588,7 +5889,7 @@ def workflow_run(app: AppContext, workflow_file: Path, save_plan: Path | None, b
             step_result.update({"output": str(output), "item_count": len(items)})
         elif action == "export-items":
             output = Path(step["output"])
-            export_format = str(step.get("format", "auto"))
+            export_format = _effective_export_format(app, str(step.get("format", "auto")))
             if not app.dry_run:
                 resolved_format = _write_items_export(output, items, export_format)
                 step_result.update({"output": str(output), "format": resolved_format, "item_count": len(items)})
@@ -5597,17 +5898,19 @@ def workflow_run(app: AppContext, workflow_file: Path, save_plan: Path | None, b
         elif action == "report-tags":
             output = Path(step["output"])
             top = int(step.get("top", 20))
+            requested_format = _effective_report_format(app, str(step.get("format", "auto")))
             document = {
                 "title": "CLI-Anything Eagle Tag Report",
                 **_build_tag_stats(items, top=top),
                 "audit": _build_tag_audit(items, top=top),
             }
             if not app.dry_run:
-                step_result.update({"output": str(output), "format": _write_report(output, document, requested_format=str(step.get("format", "auto")))})
+                step_result.update({"output": str(output), "format": _write_report(output, document, requested_format=requested_format)})
             else:
-                step_result.update({"output": str(output), "format": str(step.get("format", "auto"))})
+                step_result.update({"output": str(output), "format": requested_format})
         elif action == "report-folders":
             output = Path(step["output"])
+            requested_format = _effective_report_format(app, str(step.get("format", "auto")))
             folder_map = {record.id: record.path for record in _folder_records(app)}
             from collections import Counter
 
@@ -5625,11 +5928,12 @@ def workflow_run(app: AppContext, workflow_file: Path, save_plan: Path | None, b
                 "total_items": len(items),
             }
             if not app.dry_run:
-                step_result.update({"output": str(output), "format": _write_report(output, document, requested_format=str(step.get("format", "auto")))})
+                step_result.update({"output": str(output), "format": _write_report(output, document, requested_format=requested_format)})
             else:
-                step_result.update({"output": str(output), "format": str(step.get("format", "auto"))})
+                step_result.update({"output": str(output), "format": requested_format})
         elif action == "report-trend":
             output = Path(step["output"])
+            requested_format = _effective_report_format(app, str(step.get("format", "auto")))
             document = {
                 "title": "CLI-Anything Eagle Trend Report",
                 "bucket": step.get("bucket", "month"),
@@ -5641,9 +5945,9 @@ def workflow_run(app: AppContext, workflow_file: Path, save_plan: Path | None, b
                 ),
             }
             if not app.dry_run:
-                step_result.update({"output": str(output), "format": _write_report(output, document, requested_format=str(step.get("format", "auto")))})
+                step_result.update({"output": str(output), "format": _write_report(output, document, requested_format=requested_format)})
             else:
-                step_result.update({"output": str(output), "format": str(step.get("format", "auto"))})
+                step_result.update({"output": str(output), "format": requested_format})
         elif action == "bulk-update":
             operations, skipped = _build_item_update_operations(
                 items,
@@ -5857,6 +6161,7 @@ def watch_import_dir(
     save_manifest: Path | None,
     reset_state: bool,
 ) -> None:
+    state_file = _effective_watch_state_file(app, state_file)
     target_folder = _resolve_folder_selector(
         app,
         folder_id=folder_id,
@@ -5951,10 +6256,10 @@ def completion() -> None:
 @click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=None)
 @pass_app
 def completion_script(app: AppContext, shell_name: str, output: Path | None) -> None:
+    shell_name = _effective_completion_shell(app, shell_name)
     script = _completion_script(shell_name)
     if output is not None:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(f"{script}\n", encoding="utf-8")
+        atomic_write_text(output, f"{script}\n")
     _emit_and_remember(
         app,
         "completion script",
@@ -6534,8 +6839,7 @@ def _snapshot_item(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _write_snapshot(path: Path, document: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    atomic_write_json(path, document)
 
 
 def _load_snapshot(path: Path) -> dict[str, Any]:
@@ -7689,18 +7993,50 @@ def _smart_folder_translation_error(record: SmartFolderRecord, translation: dict
     )
 
 
+def _configured_value(app: AppContext, key: str) -> Any:
+    return app.config.get(key)
+
+
+def _effective_export_format(app: AppContext, requested_format: str) -> str:
+    if requested_format != "auto":
+        return requested_format
+    configured = _configured_value(app, "export_format")
+    return str(configured) if configured else requested_format
+
+
+def _effective_report_format(app: AppContext, requested_format: str) -> str:
+    if requested_format != "auto":
+        return requested_format
+    configured = _configured_value(app, "report_format")
+    return str(configured) if configured else requested_format
+
+
+def _effective_completion_shell(app: AppContext, shell_name: str) -> str:
+    configured = _configured_value(app, "completion_shell")
+    if configured and shell_name == "zsh":
+        return str(configured)
+    return shell_name
+
+
+def _effective_watch_state_file(app: AppContext, state_file: Path | None) -> Path | None:
+    if state_file is not None:
+        return state_file
+    configured = _configured_value(app, "watch_state_file")
+    return Path(str(configured)).expanduser() if configured else None
+
+
 def _write_items_export(path: Path, items: list[dict[str, Any]], requested_format: str) -> str:
     export_format = _infer_export_format(path, requested_format)
     path.parent.mkdir(parents=True, exist_ok=True)
     if export_format == "json":
-        path.write_text(json.dumps(items, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        atomic_write_json(path, items)
         return export_format
     if export_format == "jsonl":
         lines = [json.dumps(item, ensure_ascii=False, sort_keys=True) for item in items]
         text = "\n".join(lines)
         if lines:
             text += "\n"
-        path.write_text(text, encoding="utf-8")
+        atomic_write_text(path, text)
         return export_format
     if export_format == "csv":
         columns = _collect_export_columns(items)
@@ -7856,8 +8192,7 @@ def _plan_document(command_name: str, operations: list[dict[str, Any]], *, conte
 
 
 def _write_plan(path: Path, document: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    atomic_write_json(path, document)
 
 
 def _save_plan_if_requested(path: Path | None, command_name: str, operations: list[dict[str, Any]], *, context: dict[str, Any] | None = None) -> None:
@@ -7867,8 +8202,7 @@ def _save_plan_if_requested(path: Path | None, command_name: str, operations: li
 
 
 def _write_manifest(path: Path, document: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    atomic_write_json(path, document)
 
 
 def _extract_operations_from_document(data: Any) -> list[dict[str, Any]]:
@@ -8325,13 +8659,13 @@ def _write_report(path: Path, document: dict[str, Any], *, requested_format: str
     report_format = _infer_report_format(path, requested_format)
     path.parent.mkdir(parents=True, exist_ok=True)
     if report_format == "json":
-        path.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        atomic_write_json(path, document)
         return report_format
     if report_format == "md":
-        path.write_text(_markdown_report(document, rows_key=rows_key), encoding="utf-8")
+        atomic_write_text(path, _markdown_report(document, rows_key=rows_key))
         return report_format
     if report_format == "html":
-        path.write_text(_html_report(document, rows_key=rows_key), encoding="utf-8")
+        atomic_write_text(path, _html_report(document, rows_key=rows_key))
         return report_format
     if report_format == "csv":
         rows = list(document.get(rows_key or "rows") or [])
@@ -8571,7 +8905,7 @@ def _load_watch_state(path: Path | None) -> dict[str, Any]:
 
 def _save_watch_state(path: Path | None, payload: dict[str, Any]) -> Path:
     state_path = _watch_state_path(path)
-    state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    atomic_write_json(state_path, payload)
     return state_path
 
 

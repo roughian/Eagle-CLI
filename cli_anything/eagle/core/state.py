@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from cli_anything.eagle.core.files import atomic_write_json
+
 
 DEFAULT_STATE_DIR = Path(
     os.environ.get(
@@ -47,13 +49,7 @@ class SessionState:
 
     def save(self, path: Path | None = None) -> None:
         state_path = path or DEFAULT_STATE_PATH
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = state_path.with_name(f"{state_path.name}.tmp-{os.getpid()}-{time.time_ns()}")
-        temp_path.write_text(
-            json.dumps(asdict(self), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temp_path.replace(state_path)
+        atomic_write_json(state_path, asdict(self))
 
     def record(self, command_name: str, response: Any) -> None:
         self.last_command = command_name

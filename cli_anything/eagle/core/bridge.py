@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from cli_anything.eagle.core.files import atomic_write_json
 from cli_anything.eagle.core.state import DEFAULT_STATE_DIR
 
 
@@ -51,7 +52,7 @@ def write_bridge_request(action: str, payload: dict[str, Any], *, root: Path | N
         "payload": payload,
     }
     request_path = layout["requests"] / f"{request_id}.json"
-    request_path.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    atomic_write_json(request_path, document)
     return {
         "request_id": request_id,
         "request_path": request_path,

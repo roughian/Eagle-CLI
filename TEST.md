@@ -18,6 +18,7 @@
 - Validate selection-set persistence, report writers, tag normalization, and
   declarative workflow dry runs.
 - Validate incremental watch planning plus shell-completion and schema helpers.
+- Validate persistent config defaults and combined dashboard reporting.
 - Run a small live smoke check separately against read-only endpoints only.
 
 ## Commands
@@ -56,6 +57,10 @@ python3 -m cli_anything.eagle.eagle_cli --json select diff review-set archived-s
 python3 -m cli_anything.eagle.eagle_cli --json report tags ./report-tags.json --all --top 10
 python3 -m cli_anything.eagle.eagle_cli --json report folders ./report-folders.json --all --top 10
 python3 -m cli_anything.eagle.eagle_cli --json report trend ./report-trend.json --all --bucket month
+python3 -m cli_anything.eagle.eagle_cli --json report dashboard ./dashboard.md --all --format md
+python3 -m cli_anything.eagle.eagle_cli --json config show
+python3 -m cli_anything.eagle.eagle_cli --json config set report_format md
+python3 -m cli_anything.eagle.eagle_cli --json config unset report_format
 python3 -m cli_anything.eagle.eagle_cli --json workflow validate ./workflow.yml
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run workflow run ./workflow.yml --save-plan ./workflow-plan.json
 python3 -m cli_anything.eagle.eagle_cli --json plan validate ./workflow-plan.json
@@ -81,11 +86,13 @@ python3 -m cli_anything.eagle.eagle_cli workflow --help
 python3 -m cli_anything.eagle.eagle_cli watch --help
 python3 -m cli_anything.eagle.eagle_cli select --help
 python3 -m cli_anything.eagle.eagle_cli tag --help
+python3 -m cli_anything.eagle.eagle_cli config --help
+python3 -m cli_anything.eagle.eagle_cli report dashboard --help
 ```
 
 ## Result
 
-- `python3 -m unittest discover -s tests -v` passed with 62 tests.
+- `python3 -m unittest discover -s tests -v` passed with 66 tests.
 - Live smoke checks passed for:
   - `cli-anything-eagle --json doctor`
   - `cli-anything-eagle --json app info`
@@ -116,6 +123,8 @@ python3 -m cli_anything.eagle.eagle_cli tag --help
   - `cli-anything-eagle --json tag stats --all --top 10`
   - `cli-anything-eagle --json select save smoke-selection --item-id <id>`
   - `cli-anything-eagle --json select sample smoke-selection --count 1 --resolve`
+  - `cli-anything-eagle --json config show`
+  - `cli-anything-eagle --json report dashboard <tmp>/dashboard.md --limit 1 --format md`
   - `cli-anything-eagle --json --dry-run workflow run <tmp>/workflow.yml --save-plan <tmp>/workflow-plan.json`
   - `cli-anything-eagle --json plan validate <tmp>/workflow-plan.json`
   - `cli-anything-eagle --json --dry-run watch import-dir <tmp> --ext png --tag review --tag-from-name`
@@ -138,6 +147,8 @@ python3 -m cli_anything.eagle.eagle_cli tag --help
   - `cli-anything-eagle watch --help`
   - `cli-anything-eagle select --help`
   - `cli-anything-eagle tag --help`
+  - `cli-anything-eagle config --help`
+  - `cli-anything-eagle report dashboard --help`
 - Verified local Eagle API shape:
   - V1 endpoints responded successfully.
   - V2 endpoints were not available on the installed build.

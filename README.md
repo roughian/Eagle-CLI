@@ -8,7 +8,8 @@ operation plans, query stats, rollback snapshots, snapshot diffs, duplicate and
 cleanup audits, duplicate cleanup plan generation, tag audits and normalization,
 saved selection sets, reusable reports, declarative workflows, manifest-driven
 ingestion, incremental import watching, plan merge/filter/split/validate
-tooling, shell-completion helpers, document schemas, high-level organize flows,
+tooling, shell-completion helpers, document schemas, persistent config defaults,
+dashboard reports, high-level organize flows,
 and a companion bridge plugin for name and folder operations that are not
 available through the local HTTP API alone.
 
@@ -63,6 +64,8 @@ cli-anything-eagle --json audit dedupe-plan ./plans/duplicates.json --keyword lo
 cli-anything-eagle --json plan stats ./plans/duplicates.json
 cli-anything-eagle --json tag stats --all --top 10
 cli-anything-eagle --json select list
+cli-anything-eagle --json config show
+cli-anything-eagle report dashboard ./reports/dashboard.md --format md --all
 cli-anything-eagle --json workflow validate ./workflow.yml
 cli-anything-eagle --json bridge status
 ```
@@ -317,9 +320,20 @@ cli-anything-eagle completion script --shell zsh --output ./completions/cli-anyt
 cli-anything-eagle schema show workflow --output ./schemas/workflow.json
 ```
 
+Persist shared CLI defaults once and reuse them everywhere:
+
+```bash
+cli-anything-eagle config set report_format md
+cli-anything-eagle config set export_format jsonl
+cli-anything-eagle config set completion_shell fish
+cli-anything-eagle config show
+cli-anything-eagle config unset completion_shell
+```
+
 ## Covered Commands
 
 - `doctor`
+- `config path`, `show`, `set`, `unset`
 - `app info`
 - `library info`, `history`, `switch`, `icon`, `summary`, `quick-access`
 - `smart-folder list`, `tree`, `show`, `rules`, `audit`, `run`
@@ -331,6 +345,7 @@ cli-anything-eagle schema show workflow --output ./schemas/workflow.json
 - `item trash`, `refresh-palette`, `refresh-thumbnail`
 - `select list`, `save`, `show`, `delete`, `sample`, `diff`
 - `report library`, `tags`, `folders`, `trend`
+- `report dashboard`
 - `preset list`, `show`, `delete`, `export`, `import`, `save-item-list`, `run-item-list`, `save-bulk-update`, `run-bulk-update`
 - `snapshot create`, `show`, `diff`, `restore`
 - `audit duplicates`, `cleanup`, `cleanup-plan`, `dedupe-plan`
@@ -356,6 +371,9 @@ cli-anything-eagle schema show workflow --output ./schemas/workflow.json
 - Session-state writes are now atomic, and a corrupted session file is moved
   aside as `session.corrupt-<timestamp>.json` on the next load instead of
   crashing the CLI.
+- Presets, plans, reports, manifests, bridge requests, and watch-state files
+  also use atomic writes so long-running or concurrent CLI usage is less likely
+  to leave partial JSON behind.
 - `--last` reuses item IDs from the immediately previous item-producing command
   recorded in session state. It is best used in sequential workflows rather
   than parallel command runs.

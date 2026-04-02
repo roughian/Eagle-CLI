@@ -2,6 +2,12 @@
 
 This changelog summarizes the releases already reflected in the repository history and documentation.
 
+## 0.10.0
+- Added persistent `config` commands for shared CLI defaults such as report format, export format, shell completion, and watch state path.
+- Added `report dashboard` for combined library, item, tag, folder, and trend summaries in a single output.
+- Applied atomic file writes more broadly across plans, snapshots, manifests, reports, bridge requests, presets, and session/watch state.
+- Made config defaults flow into report generation, item export, workflow report steps, shell completion, and watch-based imports.
+
 ## 0.9.0
 - Added tag analysis and tag-normalization workflows, including alias-map based cleanup.
 - Added saved selection sets plus report generation for library, tags, folders, and trends.

@@ -1265,6 +1265,123 @@ class EagleCliTests(unittest.TestCase):
         self.assertIn("nested", payload["data"]["items"][0]["tags"])
         self.assertIn("image", payload["data"]["items"][0]["tags"])
 
+    def test_config_surface_is_ready_for_completion_expansion(self):
+        config_group = cli.commands.get("config")
+        if config_group is None:
+            self.skipTest("config commands are not implemented yet")
+
+        self.assertTrue({"show", "set", "unset", "path"}.issubset(set(config_group.commands)))
+        result = self.runner.invoke(cli, ["config", "--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        for command_name in ["show", "set", "unset", "path"]:
+            self.assertIn(command_name, result.output)
+
+    def test_report_dashboard_surface_is_ready_for_completion_expansion(self):
+        report_group = cli.commands.get("report")
+        if report_group is None or "dashboard" not in report_group.commands:
+            self.skipTest("report dashboard is not implemented yet")
+
+        result = self.runner.invoke(cli, ["report", "dashboard", "--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("dashboard", result.output)
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    def test_config_set_show_unset_persists_defaults(self, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        with self.runner.isolated_filesystem():
+            config_path = Path("state/config.json")
+            with patch("cli_anything.eagle.core.config.DEFAULT_CONFIG_PATH", config_path):
+                result_set = self.runner.invoke(cli, ["--json", "config", "set", "report_format", "md"])
+                self.assertEqual(result_set.exit_code, 0, result_set.output)
+                result_show = self.runner.invoke(cli, ["--json", "config", "show"])
+                self.assertEqual(result_show.exit_code, 0, result_show.output)
+                result_key = self.runner.invoke(cli, ["--json", "config", "show", "--key", "report_format"])
+                self.assertEqual(result_key.exit_code, 0, result_key.output)
+                result_unset = self.runner.invoke(cli, ["--json", "config", "unset", "report_format"])
+                self.assertEqual(result_unset.exit_code, 0, result_unset.output)
+
+            with open(config_path, "r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+        payload_show = json.loads(result_show.output)
+        payload_key = json.loads(result_key.output)
+        payload_unset = json.loads(result_unset.output)
+        self.assertEqual(saved["defaults"], {})
+        self.assertEqual(payload_show["data"]["defaults"]["report_format"], "md")
+        self.assertEqual(payload_key["data"]["value"], "md")
+        self.assertTrue(payload_unset["data"]["removed"])
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.library_info")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
+    def test_report_dashboard_and_completion_use_config_defaults(
+        self,
+        mock_item_list,
+        mock_library_info,
+        mock_folder_list,
+        mock_load,
+        _mock_save,
+    ):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_list.return_value = {
+            "status": "success",
+            "data": [
+                {"id": "a", "name": "One", "tags": ["ui"], "folders": ["child"], "ext": "png", "mtime": 1710000000000},
+                {"id": "b", "name": "Two", "tags": ["ui", "design"], "folders": [], "ext": "jpg", "mtime": 1711000000000},
+            ],
+        }
+        mock_library_info.return_value = {
+            "status": "success",
+            "data": {
+                "library": {"name": "Demo", "path": "/tmp/demo.library"},
+                "applicationVersion": "4.0.0",
+                "folders": [{"id": "root", "name": "Root", "children": [{"id": "child", "name": "Child", "children": []}]}],
+                "smartFolders": [],
+                "quickAccess": [{"id": "qa", "name": "Recent", "type": "shortcut"}],
+                "tagsGroups": [],
+            },
+        }
+        mock_folder_list.return_value = {
+            "status": "success",
+            "data": [{"id": "root", "name": "Root", "children": [{"id": "child", "name": "Child", "children": []}]}],
+        }
+        with self.runner.isolated_filesystem():
+            config_path = Path("state/config.json")
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "defaults": {
+                            "report_format": "md",
+                            "completion_shell": "fish",
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            with patch("cli_anything.eagle.core.config.DEFAULT_CONFIG_PATH", config_path):
+                result_dashboard = self.runner.invoke(cli, ["--json", "report", "dashboard", "dashboard.out", "--all", "--top", "2"])
+                self.assertEqual(result_dashboard.exit_code, 0, result_dashboard.output)
+                result_completion = self.runner.invoke(cli, ["--json", "completion", "script", "--output", "completion.txt"])
+                self.assertEqual(result_completion.exit_code, 0, result_completion.output)
+                dashboard_text = Path("dashboard.out").read_text(encoding="utf-8")
+                completion_text = Path("completion.txt").read_text(encoding="utf-8")
+        payload_dashboard = json.loads(result_dashboard.output)
+        payload_completion = json.loads(result_completion.output)
+        self.assertEqual(payload_dashboard["data"]["format"], "md")
+        self.assertIn("CLI-Anything Eagle Dashboard", dashboard_text)
+        self.assertEqual(payload_completion["data"]["shell"], "fish")
+        self.assertIn("fish_source", completion_text)
+
 
 if __name__ == "__main__":
     unittest.main()

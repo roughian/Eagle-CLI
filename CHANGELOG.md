@@ -6,6 +6,7 @@ This changelog summarizes the releases already reflected in the repository histo
 - Stopped bridge read/diagnostic commands from stalling on import by deferring optional file-copy and HTTP-client setup until those paths are actually used.
 - Added lazy `AppContext.client` creation so local-only commands such as `bridge status`, `bridge doctor --skip-ping`, and `bridge cleanup` can run without initializing the Eagle HTTP backend.
 - Switched the default `EagleClient` transport to a curl-backed exec path while still supporting injected mock/session objects in tests.
+- Synchronized the companion plugin version with the CLI and added a persistent `plugin.log` bridge log for post-restart diagnostics.
 - Added regression coverage for the lazy client path and bridge-local command behavior.
 
 ## 0.12.0

@@ -75,6 +75,10 @@ cli-anything-eagle --json item selected
 cli-anything-eagle --json folder selected
 ```
 
+If the bridge plugin still shows `offline`, check the reported `log_path` after
+restarting Eagle. The plugin now writes a persistent `plugin.log` file inside
+`~/.config/cli-anything-eagle/bridge/`.
+
 ## Useful Workflows
 
 Inspect the local Eagle API and version:

@@ -6616,6 +6616,8 @@ def _bridge_status_payload() -> dict[str, Any]:
         "response_dir": summary["layout"]["responses"],
         "processed_dir": summary["layout"]["processed"],
         "status_path": summary["status_path"],
+        "log_path": summary["log_path"],
+        "log_exists": summary["log_exists"],
         "installed_plugin_paths": summary["installed_plugin_paths"],
         "default_plugin_dirs": summary["default_plugin_dirs"],
         "health": summary["health"],
@@ -6641,6 +6643,8 @@ def _bridge_suggestions(summary: dict[str, Any], ping: dict[str, Any] | None) ->
         suggestions.append("Restart Eagle, then rerun `bridge ping` or `bridge doctor` to refresh the heartbeat.")
     if summary.get("status") is None and not summary.get("status_error"):
         suggestions.append("Open Eagle once so the companion plugin can publish its bridge status file.")
+    if summary.get("log_exists"):
+        suggestions.append(f"Inspect the plugin log at `{summary.get('log_path')}` for startup errors if the heartbeat never appears.")
     if summary.get("queue_depth", 0) > 0:
         suggestions.append("Inspect the backlog with `bridge status` and prune stale files with `bridge cleanup --dry-run` if needed.")
     if ping is not None and ping.get("status") in {"timeout", "error"}:

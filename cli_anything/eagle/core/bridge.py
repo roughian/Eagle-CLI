@@ -19,6 +19,7 @@ REQUESTS_DIR = BRIDGE_STATE_DIR / "requests"
 RESPONSES_DIR = BRIDGE_STATE_DIR / "responses"
 PROCESSED_DIR = BRIDGE_STATE_DIR / "processed"
 STATUS_PATH = BRIDGE_STATE_DIR / "status.json"
+LOG_PATH = BRIDGE_STATE_DIR / "plugin.log"
 DEFAULT_WAIT_SECONDS = 15.0
 HEALTHY_HEARTBEAT_SECONDS = 5.0
 STALE_HEARTBEAT_SECONDS = 30.0
@@ -32,6 +33,7 @@ def bridge_layout(root: Path | None = None) -> dict[str, Path]:
         "responses": state_dir / "responses",
         "processed": state_dir / "processed",
         "status": state_dir / "status.json",
+        "log": state_dir / "plugin.log",
     }
 
 
@@ -172,6 +174,8 @@ def bridge_health(root: Path | None = None) -> dict[str, Any]:
         "default_plugin_dirs": [str(path) for path in default_plugin_dir_candidates()],
         "status_path": str(status_path),
         "status_exists": status_path.exists(),
+        "log_path": str(layout["log"]),
+        "log_exists": layout["log"].exists(),
         "status_error": status_error,
         "status": status_payload,
         "heartbeat_age_seconds": heartbeat_age,

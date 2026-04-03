@@ -22,7 +22,8 @@ Shared state directory:
 ```
 
 The plugin scans `requests/`, writes results to `responses/`, archives handled
-requests in `processed/`, and keeps a heartbeat in `status.json`.
+requests in `processed/`, keeps a heartbeat in `status.json`, and appends
+startup/runtime diagnostics to `plugin.log`.
 
 Install from the main CLI project:
 

@@ -9,9 +9,10 @@
   const responsesDir = path.join(stateRoot, "responses");
   const processedDir = path.join(stateRoot, "processed");
   const statusPath = path.join(stateRoot, "status.json");
+  const logPath = path.join(stateRoot, "plugin.log");
   const pluginId = "2f40db08-5ce8-4d72-9fb7-a8fdcb5c1f6b";
   const pluginName = "CLI-Anything Eagle Bridge";
-  const pluginVersion = "0.12.0";
+  const pluginVersion = "0.12.1";
 
   const statusNode = document.getElementById("status");
   const statePathNode = document.getElementById("state-path");
@@ -29,6 +30,11 @@
     }
     if (logNode) {
       logNode.textContent = logLines.join("\n");
+    }
+    try {
+      fs.appendFileSync(logPath, `${line}\n`, "utf8");
+    } catch (_error) {
+      // Avoid recursive logging failures before the state directory exists.
     }
     console.log(`[CLI-Anything Bridge] ${message}`);
   }
@@ -393,12 +399,22 @@
 
   async function bootstrap() {
     ensureDirs();
-    log("bridge bootstrap");
+    log(`bridge bootstrap version=${pluginVersion} pid=${process.pid}`);
     await writeStatus();
     setInterval(writeStatus, 2000);
     setInterval(pollRequests, 1000);
     setTimeout(pollRequests, 250);
   }
+
+  window.addEventListener("error", (event) => {
+    const detail = event && event.error && event.error.stack ? event.error.stack : event.message;
+    log(`window error: ${detail}`);
+  });
+
+  window.addEventListener("unhandledrejection", (event) => {
+    const reason = event && event.reason && event.reason.stack ? event.reason.stack : String(event.reason);
+    log(`unhandled rejection: ${reason}`);
+  });
 
   if (window.eagle && typeof window.eagle.onPluginCreate === "function") {
     window.eagle.onPluginCreate(async () => {

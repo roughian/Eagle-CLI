@@ -1,7 +1,7 @@
 import json
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 from click.testing import CliRunner
 
@@ -533,6 +533,81 @@ class EagleCliTests(unittest.TestCase):
         self.assertEqual(payload["data"]["health"], "healthy")
         self.assertFalse(payload["data"]["version_mismatch"])
         self.assertEqual(payload["data"]["pending_request_count"], 0)
+
+    @patch("cli_anything.eagle.eagle_cli.AppContext.client", new_callable=PropertyMock, side_effect=AssertionError("client should not load"))
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.bridge_health")
+    def test_bridge_status_does_not_touch_http_client(self, mock_bridge_health, mock_load, _mock_save, _mock_client):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_health.return_value = {
+            "template_dir": "/tmp/template",
+            "template_exists": True,
+            "layout": {
+                "state_dir": "/tmp/state",
+                "requests": "/tmp/requests",
+                "responses": "/tmp/responses",
+                "processed": "/tmp/processed",
+            },
+            "status_path": "/tmp/state/status.json",
+            "installed_plugin_paths": [],
+            "default_plugin_dirs": ["/tmp/plugins"],
+            "health": "offline",
+            "heartbeat_age_seconds": None,
+            "queue_depth": 0,
+            "pending_request_count": 0,
+            "pending_response_count": 0,
+            "processed_count": 0,
+            "writable": {"state_dir": True, "requests": True, "responses": True, "processed": True},
+            "status_error": None,
+            "plugin_version": None,
+            "status": None,
+        }
+        result = self.runner.invoke(cli, ["--json", "bridge", "status"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["health"], "offline")
+
+    @patch("cli_anything.eagle.core.client._requests_module", side_effect=AssertionError("requests should not load"))
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.bridge_health")
+    def test_bridge_doctor_skip_ping_does_not_load_requests(
+        self, mock_bridge_health, mock_load, _mock_save, _mock_requests_module
+    ):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_health.return_value = {
+            "template_dir": "/tmp/template",
+            "template_exists": True,
+            "layout": {
+                "state_dir": "/tmp/state",
+                "requests": "/tmp/requests",
+                "responses": "/tmp/responses",
+                "processed": "/tmp/processed",
+            },
+            "status_path": "/tmp/state/status.json",
+            "installed_plugin_paths": [],
+            "default_plugin_dirs": ["/tmp/plugins"],
+            "health": "offline",
+            "heartbeat_age_seconds": None,
+            "queue_depth": 0,
+            "pending_request_count": 0,
+            "pending_response_count": 0,
+            "processed_count": 0,
+            "writable": {"state_dir": True, "requests": True, "responses": True, "processed": True},
+            "status_error": None,
+            "plugin_version": None,
+            "status": None,
+        }
+        result = self.runner.invoke(cli, ["--json", "bridge", "doctor", "--skip-ping"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["status"], "warning")
+        self.assertFalse(payload["data"]["ready"])
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")

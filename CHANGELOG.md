@@ -2,6 +2,12 @@
 
 This changelog summarizes the releases already reflected in the repository history and documentation.
 
+## 0.12.1
+- Stopped bridge read/diagnostic commands from stalling on import by deferring optional file-copy and HTTP-client setup until those paths are actually used.
+- Added lazy `AppContext.client` creation so local-only commands such as `bridge status`, `bridge doctor --skip-ping`, and `bridge cleanup` can run without initializing the Eagle HTTP backend.
+- Switched the default `EagleClient` transport to a curl-backed exec path while still supporting injected mock/session objects in tests.
+- Added regression coverage for the lazy client path and bridge-local command behavior.
+
 ## 0.12.0
 - Expanded the companion plugin with item-open and tag-rename/tag-merge bridge actions, plus safer atomic writes for plugin status and responses.
 - Added plugin-backed `item selected`, `item open`, `folder selected`, `tag rename-live`, and `tag merge-live` commands so Eagle UI state can be inspected and controlled directly from the CLI.

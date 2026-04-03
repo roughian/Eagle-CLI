@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import time
 import uuid
 from datetime import datetime, timezone
@@ -256,6 +255,10 @@ def companion_plugin_template_dir() -> Path:
 
 
 def export_companion_plugin(destination: Path) -> Path:
+    # Import shutil lazily so routine bridge reads do not pay for optional
+    # compression backends during module import.
+    import shutil
+
     source = companion_plugin_template_dir()
     if destination.exists():
         shutil.rmtree(destination)

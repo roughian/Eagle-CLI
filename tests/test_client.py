@@ -24,6 +24,10 @@ class EagleClientTests(unittest.TestCase):
         client = EagleClient(base_url="http://localhost:41595/")
         self.assertEqual(client._build_url("/api/item/list"), "http://localhost:41595/api/item/list")
 
+    def test_constructor_starts_without_a_session(self):
+        client = EagleClient()
+        self.assertIsNone(client._session)
+
     def test_detect_prefers_v1_when_available(self):
         session = Mock()
         session.get.side_effect = [

@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
-
-import requests
+from urllib.parse import quote, urlencode, urljoin
 
 
 DEFAULT_BASE_URL = "http://localhost:41595"
@@ -35,11 +34,15 @@ class EagleClient:
         base_url: str = DEFAULT_BASE_URL,
         *,
         timeout: float = 15.0,
-        session: requests.Session | None = None,
+        session: Any | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self.session = session or requests.Session()
+        self._session = session
+
+    @property
+    def session(self) -> Any | None:
+        return self._session
 
     def detect(self) -> DetectionResult:
         details: dict[str, Any] = {}
@@ -92,15 +95,20 @@ class EagleClient:
         return self.post_json("/api/library/switch", {"libraryPath": library_path})
 
     def library_icon_url(self, library_path: str) -> str:
-        encoded = requests.utils.quote(library_path, safe="")
+        encoded = quote(library_path, safe="")
         return f"{self.base_url}/api/library/icon?libraryPath={encoded}"
 
     def library_icon_download(self, library_path: str, output_path: str) -> str:
-        response = self.session.get(self.library_icon_url(library_path), timeout=self.timeout)
-        response.raise_for_status()
+        session = self.session
+        url = self.library_icon_url(library_path)
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(response.content)
+        if session is not None:
+            response = session.get(url, timeout=self.timeout)
+            response.raise_for_status()
+            output.write_bytes(response.content)
+            return str(output)
+        output.write_bytes(self._curl_download(url))
         return str(output)
 
     def folder_list(self) -> dict[str, Any]:
@@ -283,24 +291,28 @@ class EagleClient:
         payload: Any = None,
     ) -> dict[str, Any]:
         url = self._build_url(path)
+        if params:
+            url = self._append_params(url, params)
         headers: dict[str, str] = {}
-        data = None
-        json_payload = None
+        data: bytes | None = None
 
         if payload is not None:
             headers["Content-Type"] = "application/json"
-            json_payload = payload
+            data = json.dumps(payload).encode("utf-8")
 
-        response = self.session.request(
-            method=method.upper(),
-            url=url,
-            params=params,
-            json=json_payload,
-            data=data,
-            headers=headers or None,
-            timeout=self.timeout,
-        )
-        return self._parse_json_response(response)
+        session = self.session
+        if session is not None:
+            response = session.request(
+                method=method.upper(),
+                url=url,
+                params=params,
+                json=payload if payload is not None else None,
+                data=None,
+                headers=headers or None,
+                timeout=self.timeout,
+            )
+            return self._parse_json_response(response)
+        return self._curl_json(method.upper(), url, payload=payload)
 
     def _build_url(self, path: str) -> str:
         if path.startswith("http://") or path.startswith("https://"):
@@ -310,12 +322,89 @@ class EagleClient:
     def _probe(self, path: str) -> dict[str, Any] | None:
         url = self._build_url(path)
         try:
-            response = self.session.get(url, timeout=self.timeout)
-            return self._parse_json_response(response)
+            session = self.session
+            if session is not None:
+                response = session.get(url, timeout=self.timeout)
+                return self._parse_json_response(response)
+            return self._curl_json("GET", url, payload=None)
         except Exception:
             return None
 
-    def _parse_json_response(self, response: requests.Response) -> dict[str, Any]:
+    def _append_params(self, url: str, params: dict[str, Any]) -> str:
+        normalized = {key: value for key, value in params.items() if value not in (None, "", [], ())}
+        if not normalized:
+            return url
+        separator = "&" if "?" in url else "?"
+        return f"{url}{separator}{urlencode(normalized, doseq=True)}"
+
+    def _curl_json(self, method: str, url: str, *, payload: Any | None) -> dict[str, Any]:
+        marker = "__CLI_ANYTHING_EAGLE_HTTP_STATUS__:"
+        command = [
+            "curl",
+            "-sS",
+            "--max-time",
+            _format_timeout(self.timeout),
+            "-X",
+            method.upper(),
+            "-H",
+            "Accept: application/json",
+            "--write-out",
+            f"\n{marker}%{{http_code}}",
+        ]
+        if payload is not None:
+            command.extend(
+                [
+                    "-H",
+                    "Content-Type: application/json",
+                    "--data-binary",
+                    json.dumps(payload, ensure_ascii=False),
+                ]
+            )
+        command.append(url)
+        exit_code, output = _run_capture(command)
+        if exit_code != 0:
+            message = output.decode("utf-8", errors="replace").strip() or f"curl exited with status {exit_code}"
+            raise EagleApiError(message)
+        stdout = output.decode("utf-8", errors="replace")
+        body, separator, status_text = stdout.rpartition(f"\n{marker}")
+        if not separator:
+            raise EagleApiError(f"Expected curl status marker for {url}")
+        try:
+            status_code = int(status_text.strip())
+        except ValueError as exc:
+            raise EagleApiError(f"Invalid curl status marker for {url}: {status_text!r}") from exc
+        return self._parse_json_bytes(
+            body.encode("utf-8"),
+            url=url,
+            status_code=status_code,
+            reason=f"HTTP {status_code}",
+        )
+
+    def _curl_download(self, url: str) -> bytes:
+        command = [
+            "curl",
+            "-fsSL",
+            "--max-time",
+            _format_timeout(self.timeout),
+            url,
+        ]
+        exit_code, output = _run_capture(command)
+        if exit_code != 0:
+            message = output.decode("utf-8", errors="replace").strip() or f"curl exited with status {exit_code}"
+            raise EagleApiError(message)
+        return output
+
+    def _parse_json_bytes(self, payload_bytes: bytes, *, url: str, status_code: int, reason: str) -> dict[str, Any]:
+        try:
+            payload = json.loads(payload_bytes.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            raise EagleApiError(
+                f"Expected JSON response from {url}",
+                status_code=status_code,
+            ) from exc
+        return self._coerce_payload(payload, url=url, status_code=status_code, reason=reason)
+
+    def _parse_json_response(self, response: Any) -> dict[str, Any]:
         try:
             payload = response.json()
         except json.JSONDecodeError as exc:
@@ -323,9 +412,49 @@ class EagleClient:
                 f"Expected JSON response from {response.url}",
                 status_code=response.status_code,
             ) from exc
+        return self._coerce_payload(payload, url=response.url, status_code=response.status_code, reason=response.reason)
 
-        if response.ok and payload.get("status") == "success":
+    def _coerce_payload(self, payload: Any, *, url: str, status_code: int, reason: str) -> dict[str, Any]:
+        if isinstance(payload, dict) and 200 <= status_code < 300 and payload.get("status") == "success":
             return payload
 
-        message = payload.get("message") or payload.get("status") or response.reason
-        raise EagleApiError(message, status_code=response.status_code, payload=payload)
+        message = reason or f"HTTP {status_code}"
+        if isinstance(payload, dict):
+            message = payload.get("message") or payload.get("status") or message
+        raise EagleApiError(message, status_code=status_code, payload=payload)
+
+
+def _requests_module() -> Any:
+    import requests
+
+    return requests
+
+
+def _format_timeout(value: float) -> str:
+    return f"{value:g}"
+
+
+def _run_capture(command: list[str]) -> tuple[int, bytes]:
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - exercised via CLI smoke tests
+        try:
+            os.close(read_fd)
+            os.dup2(write_fd, 1)
+            os.dup2(write_fd, 2)
+            os.close(write_fd)
+            os.execvp(command[0], command)
+        except Exception:
+            os._exit(127)
+
+    os.close(write_fd)
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(read_fd, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    os.close(read_fd)
+    _, status = os.waitpid(pid, 0)
+    exit_code = os.waitstatus_to_exitcode(status)
+    return exit_code, b"".join(chunks)

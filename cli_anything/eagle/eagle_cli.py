@@ -68,13 +68,19 @@ FOLDER_COLORS = ["red", "orange", "green", "yellow", "aqua", "blue", "purple", "
 
 @dataclass
 class AppContext:
-    client: EagleClient
     state: SessionState
     config: dict[str, Any]
     json_output: bool
     timeout: float
     base_url: str
     dry_run: bool
+    _client: EagleClient | None = None
+
+    @property
+    def client(self) -> EagleClient:
+        if self._client is None:
+            self._client = EagleClient(base_url=self.base_url, timeout=self.timeout)
+        return self._client
 
 
 def pass_app(fn):
@@ -130,15 +136,14 @@ def cli(
         timeout_value = float(defaults["timeout"])
     resolved_timeout = timeout_value if timeout_value is not None else (state.timeout or 15.0)
 
-    client = EagleClient(base_url=resolved_base_url, timeout=resolved_timeout)
     ctx.obj = AppContext(
-        client=client,
         state=state,
         config=defaults,
         json_output=json_output,
         timeout=resolved_timeout,
         base_url=resolved_base_url,
         dry_run=dry_run,
+        _client=None,
     )
 
     if ctx.invoked_subcommand is None:

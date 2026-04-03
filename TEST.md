@@ -102,6 +102,16 @@ python3 -m cli_anything.eagle.eagle_cli report dashboard --help
 
 ## Result
 
+- `0.12.1` smoke checks passed for:
+  - `python3 -m py_compile cli_anything/eagle/eagle_cli.py cli_anything/eagle/core/bridge.py cli_anything/eagle/core/client.py tests/test_cli.py tests/test_client.py`
+  - `python3 -m cli_anything.eagle.eagle_cli --version`
+  - `python3 -m cli_anything.eagle.eagle_cli --json app info`
+  - `python3 -m cli_anything.eagle.eagle_cli --json doctor`
+  - `python3 -m cli_anything.eagle.eagle_cli --json bridge status`
+  - `python3 -m cli_anything.eagle.eagle_cli --json bridge doctor --skip-ping`
+  - `python3 -m cli_anything.eagle.eagle_cli --json --dry-run bridge cleanup --max-age-hours 0 --requests`
+  - `python3 -m cli_anything.eagle.eagle_cli --json bridge cleanup --max-age-hours 0 --keep-last 0 --requests --no-responses --no-processed`
+- Full `CliRunner`-based unittest runs are currently blocked on this Mac's Python framework environments because several stdlib imports can stall during test discovery. Direct CLI smoke commands remain runnable.
 - `python3 -m unittest discover -s tests -v` passed with 78 tests.
 - Live smoke checks passed for:
   - `cli-anything-eagle --json doctor`

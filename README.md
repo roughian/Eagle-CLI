@@ -19,6 +19,7 @@ health diagnostics and cleanup helpers.
 - Eagle desktop app running locally
 - Eagle API listening on `http://localhost:41595`
 - Python 3.10+
+- `curl` available on the local machine
 
 ## Install
 

@@ -2,6 +2,11 @@
 
 This changelog summarizes the releases already reflected in the repository history and documentation.
 
+## 0.12.2
+- Reduced bridge heartbeat payloads so `status.json`, `bridge status`, and `bridge ping` report compact library summaries instead of the full Eagle folder tree.
+- Kept the companion plugin version aligned with the CLI after the live-bridge restart verification pass.
+- Consumed bridge response files now get cleaned up after reads so `bridge doctor` no longer reports a false queue backlog during normal use.
+
 ## 0.12.1
 - Stopped bridge read/diagnostic commands from stalling on import by deferring optional file-copy and HTTP-client setup until those paths are actually used.
 - Added lazy `AppContext.client` creation so local-only commands such as `bridge status`, `bridge doctor --skip-ping`, and `bridge cleanup` can run without initializing the Eagle HTTP backend.

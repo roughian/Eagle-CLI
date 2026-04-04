@@ -102,6 +102,13 @@ python3 -m cli_anything.eagle.eagle_cli report dashboard --help
 
 ## Result
 
+- `0.12.2` live smoke checks passed for:
+  - Eagle restart after `bridge install-plugin`
+  - `python3 -m cli_anything.eagle.eagle_cli --json bridge status`
+  - `python3 -m cli_anything.eagle.eagle_cli --json bridge ping --timeout 5`
+  - `python3 -m cli_anything.eagle.eagle_cli --json item selected`
+  - `python3 -m cli_anything.eagle.eagle_cli --json folder selected`
+  - `python3 -m cli_anything.eagle.eagle_cli --json bridge doctor`
 - `0.12.1` smoke checks passed for:
   - `python3 -m py_compile cli_anything/eagle/eagle_cli.py cli_anything/eagle/core/bridge.py cli_anything/eagle/core/client.py tests/test_cli.py tests/test_client.py`
   - `node --check companion-plugin/plugin.js`

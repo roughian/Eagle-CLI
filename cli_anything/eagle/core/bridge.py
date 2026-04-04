@@ -87,6 +87,7 @@ def wait_for_bridge_response(request_id: str, *, timeout_seconds: float = DEFAUL
         if response_path.exists():
             payload, error = _read_json_document(response_path)
             if payload is not None:
+                response_path.unlink(missing_ok=True)
                 return payload
             if error is None:
                 return None

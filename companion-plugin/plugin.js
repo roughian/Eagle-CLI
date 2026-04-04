@@ -12,7 +12,7 @@
   const logPath = path.join(stateRoot, "plugin.log");
   const pluginId = "2f40db08-5ce8-4d72-9fb7-a8fdcb5c1f6b";
   const pluginName = "CLI-Anything Eagle Bridge";
-  const pluginVersion = "0.12.1";
+  const pluginVersion = "0.12.2";
 
   const statusNode = document.getElementById("status");
   const statePathNode = document.getElementById("state-path");
@@ -58,7 +58,7 @@
     let library = null;
     try {
       if (eagle && eagle.library && typeof eagle.library.info === "function") {
-        library = await eagle.library.info();
+        library = summarizeLibraryInfo(await eagle.library.info());
       }
     } catch (error) {
       log(`library.info failed: ${error.message}`);
@@ -97,6 +97,39 @@
     } catch (_error) {
       return 0;
     }
+  }
+
+  function countTree(nodes) {
+    let count = 0;
+    const stack = Array.isArray(nodes) ? [...nodes] : [];
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (!node || typeof node !== "object") {
+        continue;
+      }
+      count += 1;
+      const children = Array.isArray(node.children) ? node.children : [];
+      for (const child of children) {
+        stack.push(child);
+      }
+    }
+    return count;
+  }
+
+  function summarizeLibraryInfo(library) {
+    if (!library || typeof library !== "object") {
+      return null;
+    }
+    return {
+      applicationVersion: library.applicationVersion || null,
+      name: library.name || null,
+      path: library.path || null,
+      modificationTime: library.modificationTime || null,
+      quickAccessCount: Array.isArray(library.quickAccess) ? library.quickAccess.length : 0,
+      folderCount: countTree(library.folders),
+      smartFolderCount: countTree(library.smartFolders),
+      tagGroupCount: countTree(library.tagsGroups),
+    };
   }
 
   async function getItemsByIds(ids) {

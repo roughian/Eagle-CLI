@@ -4197,31 +4197,25 @@ def plan_filter(
 
 @plan.command("explain")
 @click.argument("plan_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html", "csv"]), default="auto", show_default=True)
 @pass_app
-def plan_explain(app: AppContext, plan_file: Path) -> None:
+def plan_explain(app: AppContext, plan_file: Path, output: Path | None, report_format: str) -> None:
     data = _load_data_file(plan_file)
     operations = _extract_operations_from_document(data)
-    rows = []
-    for index, operation in enumerate(operations, start=1):
-        rows.append(
-            {
-                "index": index,
-                "kind": operation.get("kind", "http"),
-                "method": operation.get("method", ""),
-                "endpoint": operation.get("endpoint", ""),
-                "action": operation.get("action", ""),
-                "description": operation.get("description", ""),
-            }
-        )
+    document = _plan_explain_document(plan_file, data, operations)
+    resolved_format = None
+    if output is not None:
+        resolved_format = _write_report(output, document, requested_format=_effective_report_format(app, report_format))
     _emit_and_remember(
         app,
         "plan explain",
         {
             "status": "success",
             "data": {
-                "plan_file": str(plan_file),
-                "command": data.get("command"),
-                "rows": rows,
+                **document,
+                "saved_to": str(output) if output is not None else None,
+                "format": resolved_format,
             },
         },
     )
@@ -5277,6 +5271,44 @@ def report() -> None:
     """Report generation commands."""
 
 
+@report.command("index")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.argument("input_paths", nargs=-1, type=click.Path(exists=True, path_type=Path))
+@click.option("--recursive/--no-recursive", default=True, show_default=True)
+@click.option("--glob", "globs", multiple=True, help="Repeatable file glob for directory inputs.")
+@click.option("--include-hidden", is_flag=True, help="Include hidden files when scanning directories.")
+@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html", "csv"]), default="auto", show_default=True)
+@pass_app
+def report_index(
+    app: AppContext,
+    output_file: Path,
+    input_paths: tuple[Path, ...],
+    recursive: bool,
+    globs: tuple[str, ...],
+    include_hidden: bool,
+    report_format: str,
+) -> None:
+    if not input_paths:
+        raise click.ClickException("Provide at least one input file or directory to index.")
+    files = _collect_index_input_files(input_paths, recursive=recursive, globs=globs, include_hidden=include_hidden)
+    document = _report_index_document(input_paths, files)
+    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
+    _emit_and_remember(
+        app,
+        "report index",
+        {
+            "status": "success",
+            "data": {
+                "saved_to": str(output_file),
+                "format": resolved_format,
+                "row_count": len(document.get("rows") or []),
+                "indexed_file_count": document.get("indexed_file_count", 0),
+                "summary": document.get("summary") or {},
+            },
+        },
+    )
+
+
 @report.command("library")
 @click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
 @click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html", "csv"]), default="auto", show_default=True)
@@ -5710,6 +5742,66 @@ def report_dashboard(
 @cli.group()
 def workflow() -> None:
     """Declarative workflow commands."""
+
+
+@workflow.command("template")
+@click.argument("template_name", required=False)
+@click.argument("output_file", required=False, type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--list", "list_only", is_flag=True, help="List built-in workflow templates.")
+@click.option("--format", "document_format", type=click.Choice(["auto", "yaml", "json"]), default="auto", show_default=True)
+@click.option("--force", is_flag=True, help="Overwrite the output path if it already exists.")
+@pass_app
+def workflow_template(
+    app: AppContext,
+    template_name: str | None,
+    output_file: Path | None,
+    list_only: bool,
+    document_format: str,
+    force: bool,
+) -> None:
+    catalog = _workflow_template_catalog()
+    if list_only:
+        _emit_and_remember(
+            app,
+            "workflow template",
+            {
+                "status": "success",
+                "data": {
+                    "templates": [
+                        {
+                            "name": name,
+                            "description": entry["description"],
+                            "step_count": len(entry["document"].get("steps") or []),
+                        }
+                        for name, entry in catalog.items()
+                    ]
+                },
+            },
+        )
+        return
+    if not template_name or output_file is None:
+        raise click.ClickException("Provide TEMPLATE_NAME and OUTPUT_FILE, or use --list to inspect available templates.")
+    entry = catalog.get(template_name)
+    if entry is None:
+        raise click.ClickException(f"Unknown workflow template: {template_name}")
+    if output_file.exists() and not force:
+        raise click.ClickException(f"Refusing to overwrite existing file: {output_file}. Use --force to replace it.")
+    document = json.loads(json.dumps(entry["document"]))
+    resolved_format = _write_structured_document(output_file, document, requested_format=document_format, default_format="yaml")
+    _emit_and_remember(
+        app,
+        "workflow template",
+        {
+            "status": "success",
+            "data": {
+                "template": template_name,
+                "description": entry["description"],
+                "saved_to": str(output_file),
+                "format": resolved_format,
+                "step_count": len(document.get("steps") or []),
+            },
+        },
+    )
 
 
 @workflow.command("validate")
@@ -8279,6 +8371,32 @@ def _write_manifest(path: Path, document: dict[str, Any]) -> None:
     atomic_write_json(path, document)
 
 
+def _infer_structured_format(path: Path, requested_format: str, *, default_format: str = "yaml") -> str:
+    if requested_format != "auto":
+        return requested_format
+    if path.suffix.casefold() == ".json":
+        return "json"
+    return default_format
+
+
+def _write_structured_document(
+    path: Path,
+    document: dict[str, Any],
+    *,
+    requested_format: str,
+    default_format: str = "yaml",
+) -> str:
+    document_format = _infer_structured_format(path, requested_format, default_format=default_format)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if document_format == "json":
+        atomic_write_json(path, document)
+        return document_format
+    if document_format == "yaml":
+        atomic_write_text(path, yaml.safe_dump(document, allow_unicode=True, sort_keys=False))
+        return document_format
+    raise click.ClickException(f"Unsupported structured document format: {document_format}")
+
+
 def _extract_operations_from_document(data: Any) -> list[dict[str, Any]]:
     if not isinstance(data, dict):
         return []
@@ -8316,6 +8434,63 @@ def _plan_stats(plan_file: Path, data: dict[str, Any], operations: list[dict[str
         "endpoints": endpoint_counts,
         "bridge_actions": bridge_action_counts,
         "context": data.get("context") or {},
+    }
+
+
+def _sorted_count_rows(counts: dict[str, int], *, key_name: str) -> list[dict[str, Any]]:
+    return [
+        {key_name: value, "count": count}
+        for value, count in sorted(counts.items(), key=lambda row: (-row[1], row[0]))
+    ]
+
+
+def _plan_explain_document(plan_file: Path, data: dict[str, Any], operations: list[dict[str, Any]]) -> dict[str, Any]:
+    rows = []
+    kind_counts = {"http": 0, "bridge": 0}
+    method_counts: dict[str, int] = {}
+    endpoint_counts: dict[str, int] = {}
+    action_counts: dict[str, int] = {}
+    described_count = 0
+    for index, operation in enumerate(operations, start=1):
+        kind = str(operation.get("kind") or "http")
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+        description = str(operation.get("description") or "")
+        if description:
+            described_count += 1
+        method = str(operation.get("method") or ("POST" if kind == "http" else "")).upper()
+        endpoint = str(operation.get("endpoint") or "")
+        action = str(operation.get("action") or "")
+        payload = operation.get("payload") or {}
+        if kind == "http":
+            method_counts[method] = method_counts.get(method, 0) + 1
+            endpoint_counts[endpoint] = endpoint_counts.get(endpoint, 0) + 1
+        elif action:
+            action_counts[action] = action_counts.get(action, 0) + 1
+        rows.append(
+            {
+                "index": index,
+                "kind": kind,
+                "method": method,
+                "endpoint": endpoint,
+                "action": action,
+                "description": description,
+                "payload_keys": sorted(payload.keys()) if isinstance(payload, dict) else [],
+            }
+        )
+    return {
+        "title": "CLI-Anything Eagle Plan Explain",
+        "plan_file": str(plan_file),
+        "command": data.get("command"),
+        "context": data.get("context") or {},
+        "summary": {
+            "operation_count": len(operations),
+            "described_count": described_count,
+            "kind_counts": kind_counts,
+            "http_methods": _sorted_count_rows(method_counts, key_name="method"),
+            "http_endpoints": _sorted_count_rows(endpoint_counts, key_name="endpoint"),
+            "bridge_actions": _sorted_count_rows(action_counts, key_name="action"),
+        },
+        "rows": rows,
     }
 
 
@@ -8773,6 +8948,175 @@ def _trend_rows(items: list[dict[str, Any]], *, bucket: str, field: str) -> list
             label = f"{dt.year:04d}-{dt.month:02d}"
         buckets[label] += 1
     return [{"bucket": key, "count": buckets[key]} for key in sorted(buckets.keys())]
+
+
+def _workflow_template_catalog() -> dict[str, dict[str, Any]]:
+    return {
+        "review-batch": {
+            "description": "Snapshot a filtered batch, tag it as reviewed, then export a tag summary.",
+            "document": {
+                "kind": "eagle-cli-workflow",
+                "version": 1,
+                "selection": {
+                    "fetch_all": True,
+                    "keyword": "review",
+                    "limit": 100,
+                },
+                "steps": [
+                    {"action": "snapshot", "output": "./snapshots/review-batch.json"},
+                    {"action": "bulk-update", "add_tags": ["reviewed"], "skip_unchanged": True},
+                    {"action": "report-tags", "output": "./reports/review-batch-tags.md", "format": "md", "top": 25},
+                ],
+            },
+        },
+        "report-pack": {
+            "description": "Build a reusable tag, folder, and trend reporting pack for a filtered slice of the library.",
+            "document": {
+                "kind": "eagle-cli-workflow",
+                "version": 1,
+                "selection": {
+                    "fetch_all": True,
+                    "keyword": "reference",
+                    "limit": 200,
+                },
+                "steps": [
+                    {"action": "report-tags", "output": "./reports/tag-report.md", "format": "md", "top": 30},
+                    {"action": "report-folders", "output": "./reports/folder-report.md", "format": "md", "top": 30},
+                    {"action": "report-trend", "output": "./reports/trend-report.json", "format": "json", "bucket": "month", "field": "modification"},
+                ],
+            },
+        },
+        "archive-batch": {
+            "description": "Snapshot, rename, and move a batch into an archive folder with a saved audit trail.",
+            "document": {
+                "kind": "eagle-cli-workflow",
+                "version": 1,
+                "selection": {
+                    "fetch_all": True,
+                    "keyword": "archive",
+                    "limit": 100,
+                },
+                "steps": [
+                    {"action": "snapshot", "output": "./snapshots/archive-batch.json"},
+                    {"action": "rename", "prefix": "archived-", "skip_unchanged": True},
+                    {"action": "move", "ensure_target_path": "Archive/Reviewed", "skip_unchanged": True},
+                    {"action": "export-items", "output": "./exports/archive-batch.json", "format": "json"},
+                ],
+            },
+        },
+    }
+
+
+def _is_hidden_path(path: Path) -> bool:
+    return any(part.startswith(".") for part in path.parts if part not in {".", ".."})
+
+
+def _collect_index_input_files(
+    input_paths: tuple[Path, ...],
+    *,
+    recursive: bool,
+    globs: tuple[str, ...],
+    include_hidden: bool,
+) -> list[Path]:
+    patterns = tuple(globs) or ("*.json", "*.yaml", "*.yml", "*.md", "*.html", "*.csv")
+    files: list[Path] = []
+    seen: set[str] = set()
+    for input_path in input_paths:
+        candidate_paths: list[Path]
+        if input_path.is_file():
+            candidate_paths = [input_path]
+        else:
+            walker = input_path.rglob("*") if recursive else input_path.glob("*")
+            candidate_paths = [candidate for candidate in walker if candidate.is_file()]
+        for candidate in candidate_paths:
+            if not include_hidden and _is_hidden_path(candidate.relative_to(input_path if input_path.is_dir() else candidate.parent)):
+                continue
+            if patterns and not any(candidate.match(pattern) or candidate.name == pattern for pattern in patterns):
+                continue
+            normalized = str(candidate.resolve())
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            files.append(candidate)
+    return sorted(files, key=lambda path: str(path))
+
+
+def _index_kind_summary(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    kind = str(payload.get("kind") or "")
+    if kind == "eagle-cli-plan":
+        return "plan", {"title": payload.get("command"), "operation_count": len(payload.get("operations") or [])}
+    if kind == "eagle-cli-snapshot":
+        return "snapshot", {"title": payload.get("command"), "item_count": len(payload.get("items") or [])}
+    if kind == "eagle-cli-selection":
+        return "selection", {"title": payload.get("name"), "item_count": len(payload.get("item_ids") or [])}
+    if kind == "eagle-cli-workflow":
+        return "workflow", {"title": payload.get("name"), "step_count": len(payload.get("steps") or [])}
+    if kind == "eagle-cli-add-paths-manifest":
+        return "manifest", {"item_count": len(payload.get("items") or [])}
+    if kind == "eagle-cli-preset-bundle":
+        return "preset-bundle", {"entry_count": len((payload.get("presets") or {}).keys())}
+    if payload.get("title"):
+        rows = payload.get("rows")
+        return "report", {"title": payload.get("title"), "row_count": len(rows) if isinstance(rows, list) else 0}
+    if "status" in payload and "data" in payload:
+        return "result", {"title": payload.get("command") or payload.get("status")}
+    return "document", {"title": payload.get("title") or payload.get("command") or payload.get("name")}
+
+
+def _index_row(path: Path) -> dict[str, Any]:
+    from datetime import datetime, timezone
+
+    stat = path.stat()
+    row: dict[str, Any] = {
+        "path": str(path),
+        "name": path.name,
+        "extension": path.suffix.casefold(),
+        "size_bytes": stat.st_size,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        "kind": "file",
+        "title": "",
+    }
+    if path.suffix.casefold() in {".json", ".yaml", ".yml"}:
+        try:
+            payload = _load_data_file(path)
+        except Exception as exc:  # pragma: no cover - defensive parsing path
+            row["parse_error"] = str(exc)
+            return row
+        if isinstance(payload, dict):
+            kind, extras = _index_kind_summary(payload)
+            row["kind"] = kind
+            row.update(extras)
+            return row
+    if path.suffix.casefold() == ".md":
+        row["kind"] = "markdown-report"
+    elif path.suffix.casefold() == ".html":
+        row["kind"] = "html-report"
+    elif path.suffix.casefold() == ".csv":
+        row["kind"] = "csv-report"
+    return row
+
+
+def _report_index_document(input_paths: tuple[Path, ...], files: list[Path]) -> dict[str, Any]:
+    kind_counts: dict[str, int] = {}
+    extension_counts: dict[str, int] = {}
+    rows = []
+    for path in files:
+        row = _index_row(path)
+        rows.append(row)
+        kind = str(row.get("kind") or "file")
+        ext = str(row.get("extension") or "")
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+        extension_counts[ext] = extension_counts.get(ext, 0) + 1
+    return {
+        "title": "CLI-Anything Eagle Report Index",
+        "inputs": [str(path) for path in input_paths],
+        "indexed_file_count": len(files),
+        "summary": {
+            "kind_counts": _sorted_count_rows(kind_counts, key_name="kind"),
+            "extension_counts": _sorted_count_rows(extension_counts, key_name="extension"),
+        },
+        "rows": rows,
+    }
 
 
 def _load_workflow(path: Path) -> dict[str, Any]:

@@ -71,6 +71,10 @@ cli-anything-eagle --json plan stats ./plans/duplicates.json
 cli-anything-eagle --json tag stats --all --top 10
 cli-anything-eagle --json select list
 cli-anything-eagle --json config show
+cli-anything-eagle --json workflow template --list
+cli-anything-eagle workflow template review-batch ./workflow.yml
+cli-anything-eagle --json plan explain ./plans/duplicates.json --output ./plans/duplicates.md --format md
+cli-anything-eagle report index ./reports/index.md ./reports ./plans
 cli-anything-eagle report dashboard ./reports/dashboard.md --format md --all
 cli-anything-eagle --json workflow validate ./workflow.yml
 cli-anything-eagle --json bridge status
@@ -316,6 +320,15 @@ cli-anything-eagle plan stats ./plans/rename.json
 cli-anything-eagle plan apply ./plans/rename.json
 ```
 
+Explain a saved plan or scaffold a fresh workflow before editing it:
+
+```bash
+cli-anything-eagle workflow template --list
+cli-anything-eagle workflow template review-batch ./workflow.yml
+cli-anything-eagle --json workflow validate ./workflow.yml
+cli-anything-eagle --json plan explain ./plans/rename.json --output ./plans/rename.md --format md
+```
+
 Audit and normalize tags before large cleanup passes:
 
 ```bash
@@ -354,6 +367,7 @@ cli-anything-eagle --dry-run workflow run ./workflow.yml --save-plan ./plans/wor
 cli-anything-eagle plan validate ./plans/workflow.json
 cli-anything-eagle plan split ./plans/workflow.json ./plans/chunks --max-operations 25
 cli-anything-eagle plan merge ./plans/all.json ./plans/chunks/*.json
+cli-anything-eagle report index ./reports/index.json ./reports ./plans ./snapshots
 ```
 
 Use manifests, incremental watching, shell completion, and built-in schemas:

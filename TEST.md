@@ -73,6 +73,10 @@ python3 -m cli_anything.eagle.eagle_cli --json ingest manifest ./manifest.json
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run watch import-dir ./incoming --recursive --ext png --tag-from-name
 python3 -m cli_anything.eagle.eagle_cli --json completion script --shell zsh --output ./completions/cli-anything-eagle.zsh
 python3 -m cli_anything.eagle.eagle_cli --json schema show workflow --output ./schemas/workflow.json
+python3 -m cli_anything.eagle.eagle_cli --json workflow template --list
+python3 -m cli_anything.eagle.eagle_cli --json workflow template review-batch ./workflow.yml
+python3 -m cli_anything.eagle.eagle_cli --json plan explain ./workflow-plan.json --output ./workflow-plan.md --format md
+python3 -m cli_anything.eagle.eagle_cli --json report index ./report-index.json ./reports ./plans ./snapshots
 python3 -m cli_anything.eagle.eagle_cli --json bridge export-plugin ./bridge-plugin
 python3 -m cli_anything.eagle.eagle_cli --json bridge status
 python3 -m cli_anything.eagle.eagle_cli --json bridge selected-item-ids
@@ -104,10 +108,14 @@ python3 -m cli_anything.eagle.eagle_cli report dashboard --help
 
 ## Result
 
-- `0.13.1` checks passed for:
+- `0.14.0` checks passed for:
   - `python3 -m unittest discover -s tests -v`
   - `node --check companion-plugin/plugin.js`
   - `node --check cli_anything/eagle/assets/companion-plugin/plugin.js`
+  - `python3 -m cli_anything.eagle.eagle_cli --json workflow template --list`
+  - `python3 -m cli_anything.eagle.eagle_cli --json workflow template review-batch <tmp>/workflow.yml`
+  - `python3 -m cli_anything.eagle.eagle_cli --json plan explain <tmp>/plan.json --output <tmp>/plan.md --format md`
+  - `python3 -m cli_anything.eagle.eagle_cli --json report index <tmp>/report-index.json <tmp>/inputs`
   - `python3 -m cli_anything.eagle.eagle_cli --json bridge selected-item-ids`
   - `python3 -m cli_anything.eagle.eagle_cli --json bridge select-items --selection smoke-selection`
   - `python3 -m cli_anything.eagle.eagle_cli --json --dry-run item bulk-update --current-selection --add-tag reviewed`

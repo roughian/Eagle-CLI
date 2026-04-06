@@ -12,7 +12,7 @@
   const logPath = path.join(stateRoot, "plugin.log");
   const pluginId = "2f40db08-5ce8-4d72-9fb7-a8fdcb5c1f6b";
   const pluginName = "CLI-Anything Eagle Bridge";
-  const pluginVersion = "0.13.1";
+  const pluginVersion = "0.14.0";
 
   const statusNode = document.getElementById("status");
   const statePathNode = document.getElementById("state-path");

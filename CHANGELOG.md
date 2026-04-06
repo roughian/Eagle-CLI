@@ -2,9 +2,14 @@
 
 This changelog summarizes the releases already reflected in the repository history and documentation.
 
+## 0.14.0
+- Added `workflow template` so common review, reporting, and archive flows can be scaffolded as ready-to-edit YAML or JSON workflow files.
+- Expanded `plan explain` into a richer summary surface with operation breakdowns and optional saved Markdown/HTML/JSON/CSV explanations.
+- Added `report index` to catalog existing plans, snapshots, workflows, manifests, and reports into a reusable inventory document.
+
 ## 0.13.1
 - Extended saved-selection and current-selection targeting across tag workflows, audit reports, and report generation commands instead of limiting selection-aware flows to item mutations.
- - Added a companion-plugin compatibility fallback so single-item `bridge select-items` can attempt `open()` on older runtimes and report the actual post-fallback selection state instead of assuming success.
+- Added a companion-plugin compatibility fallback so single-item `bridge select-items` can attempt `open()` on older runtimes and report the actual post-fallback selection state instead of assuming success.
 - Added regression coverage for plugin-backed `audit cleanup --current-selection` plus saved-selection support in `tag stats` and `report tags`.
 - Synchronized the CLI, packaged plugin assets, and companion-plugin manifest versions after the selection-surface expansion.
 

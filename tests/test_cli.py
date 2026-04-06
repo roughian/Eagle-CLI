@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import PropertyMock, patch
 
 from click.testing import CliRunner
+import yaml
 
 from cli_anything.eagle.eagle_cli import cli
 
@@ -1644,6 +1645,37 @@ class EagleCliTests(unittest.TestCase):
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    def test_plan_explain_summarizes_operations_and_writes_markdown(self, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        with self.runner.isolated_filesystem():
+            with open("plan.json", "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "kind": "eagle-cli-plan",
+                        "version": 1,
+                        "command": "demo",
+                        "operations": [
+                            {"method": "POST", "endpoint": "/api/item/update", "payload": {"id": "a"}, "description": "Update A"},
+                            {"kind": "bridge", "action": "rename_items", "payload": {"operations": []}, "description": "Rename A"},
+                        ],
+                    },
+                    handle,
+                )
+            result = self.runner.invoke(cli, ["--json", "plan", "explain", "plan.json", "--output", "explain.md", "--format", "md"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            with open("explain.md", "r", encoding="utf-8") as handle:
+                content = handle.read()
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["format"], "md")
+        self.assertEqual(payload["data"]["summary"]["kind_counts"]["http"], 1)
+        self.assertEqual(payload["data"]["summary"]["kind_counts"]["bridge"], 1)
+        self.assertEqual(payload["data"]["summary"]["bridge_actions"][0]["action"], "rename_items")
+        self.assertIn("# CLI-Anything Eagle Plan Explain", content)
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
     @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
     def test_plan_rollback_from_results_builds_restore_plan(self, mock_item_info, mock_load, _mock_save):
         from cli_anything.eagle.core.state import SessionState
@@ -1684,6 +1716,30 @@ class EagleCliTests(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, result.output)
             payload = json.loads(result.output)
             self.assertFalse(payload["data"]["valid"])
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    def test_workflow_template_lists_and_writes_yaml(self, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        with self.runner.isolated_filesystem():
+            listed = self.runner.invoke(cli, ["--json", "workflow", "template", "--list"])
+            self.assertEqual(listed.exit_code, 0, listed.output)
+            written = self.runner.invoke(cli, ["--json", "workflow", "template", "review-batch", "workflow.yml"])
+            self.assertEqual(written.exit_code, 0, written.output)
+            with open("workflow.yml", "r", encoding="utf-8") as handle:
+                workflow = yaml.safe_load(handle)
+            validated = self.runner.invoke(cli, ["--json", "workflow", "validate", "workflow.yml"])
+            self.assertEqual(validated.exit_code, 0, validated.output)
+        listed_payload = json.loads(listed.output)
+        written_payload = json.loads(written.output)
+        validated_payload = json.loads(validated.output)
+        self.assertTrue(any(entry["name"] == "review-batch" for entry in listed_payload["data"]["templates"]))
+        self.assertEqual(written_payload["data"]["format"], "yaml")
+        self.assertEqual(workflow["kind"], "eagle-cli-workflow")
+        self.assertEqual(workflow["steps"][0]["action"], "snapshot")
+        self.assertTrue(validated_payload["data"]["valid"])
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
@@ -1864,6 +1920,37 @@ class EagleCliTests(unittest.TestCase):
         payload = json.loads(result.output)
         self.assertEqual(payload["data"]["row_count"], 1)
         self.assertEqual(report["rows"][0]["tag"], "ui")
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    def test_report_index_summarizes_existing_documents(self, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        with self.runner.isolated_filesystem():
+            Path("inputs").mkdir()
+            Path("inputs/plan.json").write_text(
+                json.dumps({"kind": "eagle-cli-plan", "version": 1, "operations": [{"method": "POST", "endpoint": "/api/item/update"}]}),
+                encoding="utf-8",
+            )
+            Path("inputs/snapshot.json").write_text(
+                json.dumps({"kind": "eagle-cli-snapshot", "version": 1, "items": [{"id": "a"}]}),
+                encoding="utf-8",
+            )
+            Path("inputs/report.json").write_text(
+                json.dumps({"title": "Demo Report", "rows": [{"name": "alpha"}]}),
+                encoding="utf-8",
+            )
+            result = self.runner.invoke(cli, ["--json", "report", "index", "index.json", "inputs"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            with open("index.json", "r", encoding="utf-8") as handle:
+                document = json.load(handle)
+        payload = json.loads(result.output)
+        kind_counts = {row["kind"]: row["count"] for row in document["summary"]["kind_counts"]}
+        self.assertEqual(payload["data"]["row_count"], 3)
+        self.assertEqual(kind_counts["plan"], 1)
+        self.assertEqual(kind_counts["snapshot"], 1)
+        self.assertEqual(kind_counts["report"], 1)
 
     @patch("cli_anything.eagle.eagle_cli.DEFAULT_STATE_DIR", Path(".state"))
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")

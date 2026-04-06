@@ -104,12 +104,16 @@ python3 -m cli_anything.eagle.eagle_cli report dashboard --help
 
 ## Result
 
-- `0.13.0` checks passed for:
+- `0.13.1` checks passed for:
   - `python3 -m unittest discover -s tests -v`
   - `node --check companion-plugin/plugin.js`
   - `node --check cli_anything/eagle/assets/companion-plugin/plugin.js`
   - `python3 -m cli_anything.eagle.eagle_cli --json bridge selected-item-ids`
+  - `python3 -m cli_anything.eagle.eagle_cli --json bridge select-items --selection smoke-selection`
   - `python3 -m cli_anything.eagle.eagle_cli --json --dry-run item bulk-update --current-selection --add-tag reviewed`
+  - `python3 -m cli_anything.eagle.eagle_cli --json audit cleanup --current-selection --sample-limit 5`
+  - `python3 -m cli_anything.eagle.eagle_cli --json tag stats --selection smoke-selection --top 10`
+  - `python3 -m cli_anything.eagle.eagle_cli --json report tags <tmp>/report-tags-selection.json --selection smoke-selection --top 10`
   - isolated build env plus `python -m build`
   - fresh-venv install from the local repo plus `python -m cli_anything.eagle.eagle_cli --json bridge export-plugin <tmp>/plugin-copy`
 - `0.12.2` live smoke checks passed for:
@@ -130,8 +134,7 @@ python3 -m cli_anything.eagle.eagle_cli report dashboard --help
   - `python3 -m cli_anything.eagle.eagle_cli --json bridge install-plugin`
   - `python3 -m cli_anything.eagle.eagle_cli --json --dry-run bridge cleanup --max-age-hours 0 --requests`
   - `python3 -m cli_anything.eagle.eagle_cli --json bridge cleanup --max-age-hours 0 --keep-last 0 --requests --no-responses --no-processed`
-- Full `CliRunner`-based unittest runs are currently blocked on this Mac's Python framework environments because several stdlib imports can stall during test discovery. Direct CLI smoke commands remain runnable.
-- `python3 -m unittest discover -s tests -v` passed with 78 tests.
+- Full `CliRunner`-based unittest runs passed with 89 tests.
 - Live smoke checks passed for:
   - `cli-anything-eagle --json doctor`
   - `cli-anything-eagle --json app info`

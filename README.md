@@ -257,6 +257,19 @@ cli-anything-eagle --dry-run item move-bulk --current-selection --target-folder-
 cli-anything-eagle --dry-run organize apply --current-selection --add-tag reviewed --name-prefix ui-
 ```
 
+Selection-aware filters now work across audits, tag cleanup, and reports too:
+
+```bash
+cli-anything-eagle --json audit cleanup --current-selection --sample-limit 10
+cli-anything-eagle --json tag stats --selection live-selection --top 20
+cli-anything-eagle --dry-run tag normalize --selection live-selection --trim --collapse-spaces
+cli-anything-eagle report tags ./reports/live-selection-tags.json --selection live-selection --format json
+```
+
+On older Eagle plugin runtimes that do not expose `eagle.item.select(itemIds)`,
+`bridge select-items` now falls back to `open()` for single-item requests and
+reports whether Eagle actually changed the current selection.
+
 Audit duplicate candidates and cleanup hotspots:
 
 ```bash

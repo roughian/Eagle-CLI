@@ -457,6 +457,39 @@ class EagleCliTests(unittest.TestCase):
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_audit_cleanup_current_selection_uses_plugin_ids(self, mock_bridge_request, mock_item_info, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-audit-current",
+                "response": {
+                    "status": "success",
+                    "data": {"item_ids": ["abc"]},
+                },
+            },
+        }
+        mock_item_info.return_value = {
+            "status": "success",
+            "data": {"id": "abc", "name": "Alpha", "tags": [], "annotation": "", "url": "", "folders": []},
+        }
+        result = self.runner.invoke(cli, ["--json", "audit", "cleanup", "--current-selection"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["counts"]["untagged"], 1)
+        mock_bridge_request.assert_called_once_with(
+            "get_selected_item_ids",
+            {},
+            timeout_seconds=15.0,
+            queue_only=False,
+        )
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
     @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
     def test_audit_dedupe_plan_writes_move_to_trash_plan(self, mock_item_list, mock_load, _mock_save):
         from cli_anything.eagle.core.state import SessionState
@@ -1176,6 +1209,30 @@ class EagleCliTests(unittest.TestCase):
         self.assertEqual(payload["data"]["smart_rule_count"], 1)
         self.assertEqual(payload["data"]["smart_rule_properties"], ["type"])
 
+    @patch("cli_anything.eagle.eagle_cli.DEFAULT_STATE_DIR", Path(".state"))
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    def test_tag_stats_accepts_saved_selection_name(self, mock_item_info, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_info.side_effect = [
+            {"status": "success", "data": {"id": "a", "name": "One", "tags": ["ui"]}},
+            {"status": "success", "data": {"id": "b", "name": "Two", "tags": ["ui", "design"]}},
+        ]
+        with self.runner.isolated_filesystem():
+            Path(".state/selections").mkdir(parents=True, exist_ok=True)
+            Path(".state/selections/tagged.json").write_text(
+                json.dumps({"kind": "eagle-cli-selection", "name": "tagged", "item_ids": ["a", "b"]}),
+                encoding="utf-8",
+            )
+            result = self.runner.invoke(cli, ["--json", "tag", "stats", "--selection", "tagged", "--top", "1"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["total_items"], 2)
+        self.assertEqual(payload["data"]["rows"][0]["tag"], "ui")
+
     @patch("cli_anything.eagle.eagle_cli.set_preset")
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
@@ -1801,6 +1858,32 @@ class EagleCliTests(unittest.TestCase):
         }
         with self.runner.isolated_filesystem():
             result = self.runner.invoke(cli, ["--json", "report", "tags", "tags.json", "--all", "--top", "1"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            with open("tags.json", "r", encoding="utf-8") as handle:
+                report = json.load(handle)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["row_count"], 1)
+        self.assertEqual(report["rows"][0]["tag"], "ui")
+
+    @patch("cli_anything.eagle.eagle_cli.DEFAULT_STATE_DIR", Path(".state"))
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    def test_report_tags_accepts_saved_selection_name(self, mock_item_info, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_info.side_effect = [
+            {"status": "success", "data": {"id": "a", "name": "One", "tags": ["ui", "design"]}},
+            {"status": "success", "data": {"id": "b", "name": "Two", "tags": ["ui"]}},
+        ]
+        with self.runner.isolated_filesystem():
+            Path(".state/selections").mkdir(parents=True, exist_ok=True)
+            Path(".state/selections/reporting.json").write_text(
+                json.dumps({"kind": "eagle-cli-selection", "name": "reporting", "item_ids": ["a", "b"]}),
+                encoding="utf-8",
+            )
+            result = self.runner.invoke(cli, ["--json", "report", "tags", "tags.json", "--selection", "reporting", "--top", "1"])
             self.assertEqual(result.exit_code, 0, result.output)
             with open("tags.json", "r", encoding="utf-8") as handle:
                 report = json.load(handle)

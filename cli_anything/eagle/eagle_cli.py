@@ -3235,10 +3235,7 @@ def audit() -> None:
 
 
 @audit.command("duplicates")
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to audit.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--mode", "modes", multiple=True, type=click.Choice(["name", "url", "name-size", "name-ext"]), help="Repeatable duplicate strategy.")
 @click.option("--top", type=click.IntRange(1, None), default=10, show_default=True)
 @click.option("--save-report", type=click.Path(dir_okay=False, path_type=Path), default=None)
@@ -3249,6 +3246,9 @@ def audit_duplicates(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     modes: tuple[str, ...],
     top: int,
@@ -3267,6 +3267,8 @@ def audit_duplicates(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -3275,7 +3277,15 @@ def audit_duplicates(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     query = _query_or_collect_items(
         app,
         item_ids=resolved_item_ids,
@@ -3309,10 +3319,7 @@ def audit_duplicates(
 
 
 @audit.command("cleanup")
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to audit.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--sample-limit", type=click.IntRange(1, None), default=10, show_default=True)
 @click.option("--save-report", type=click.Path(dir_okay=False, path_type=Path), default=None)
 @item_filter_options
@@ -3322,6 +3329,9 @@ def audit_cleanup(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     sample_limit: int,
     save_report: Path | None,
@@ -3339,6 +3349,8 @@ def audit_cleanup(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -3347,7 +3359,15 @@ def audit_cleanup(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     query = _query_or_collect_items(
         app,
         item_ids=resolved_item_ids,
@@ -3397,10 +3417,7 @@ def audit_cleanup(
 @click.option("--ensure-target-path", default=None)
 @click.option("--batch-size", type=click.IntRange(1, None), default=100, show_default=True)
 @click.option("--save-report", type=click.Path(dir_okay=False, path_type=Path), default=None)
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @item_filter_options
 @pass_app
 def audit_cleanup_plan(
@@ -3418,6 +3435,9 @@ def audit_cleanup_plan(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     limit: int,
     offset: int,
@@ -3434,6 +3454,8 @@ def audit_cleanup_plan(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -3442,7 +3464,15 @@ def audit_cleanup_plan(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     query = _query_or_collect_items(
         app,
         item_ids=resolved_item_ids,
@@ -3519,10 +3549,7 @@ def audit_cleanup_plan(
 
 @audit.command("dedupe-plan")
 @click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect for duplicates.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--mode", type=click.Choice(["name", "url", "name-size", "name-ext"]), default="name-size", show_default=True)
 @click.option("--keep", type=click.Choice(["first", "last", "largest", "smallest", "newest", "oldest"]), default="largest", show_default=True)
 @click.option("--batch-size", type=click.IntRange(1, None), default=100, show_default=True)
@@ -3535,6 +3562,9 @@ def audit_dedupe_plan(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     mode: str,
     keep: str,
@@ -3554,6 +3584,8 @@ def audit_dedupe_plan(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -3562,7 +3594,15 @@ def audit_dedupe_plan(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     query = _query_or_collect_items(
         app,
         item_ids=resolved_item_ids,
@@ -4358,10 +4398,7 @@ def tag() -> None:
 
 
 @tag.command("stats")
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--top", type=click.IntRange(1, None), default=15, show_default=True)
 @item_filter_options
 @pass_app
@@ -4370,6 +4407,9 @@ def tag_stats(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     top: int,
     limit: int,
@@ -4386,6 +4426,8 @@ def tag_stats(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -4394,7 +4436,15 @@ def tag_stats(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     query = _query_or_collect_items(
         app,
         item_ids=resolved_item_ids,
@@ -4416,10 +4466,7 @@ def tag_stats(
 
 
 @tag.command("audit")
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--top", type=click.IntRange(1, None), default=15, show_default=True)
 @item_filter_options
 @pass_app
@@ -4428,6 +4475,9 @@ def tag_audit(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     top: int,
     limit: int,
@@ -4444,6 +4494,8 @@ def tag_audit(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -4452,7 +4504,15 @@ def tag_audit(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     query = _query_or_collect_items(
         app,
         item_ids=resolved_item_ids,
@@ -4560,10 +4620,7 @@ def tag_merge_live(app: AppContext, source: str, target: str, bridge_timeout: fl
 
 
 @tag.command("rename")
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to update.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--limit", type=int, default=200, show_default=True)
 @click.option("--offset", type=int, default=0, show_default=True)
 @click.option("--order-by", default=None)
@@ -4586,6 +4643,9 @@ def tag_rename(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     limit: int,
     offset: int,
@@ -4608,6 +4668,8 @@ def tag_rename(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -4616,7 +4678,15 @@ def tag_rename(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     items = _collect_target_items(
         app,
         item_ids=resolved_item_ids,
@@ -4685,10 +4755,7 @@ def tag_rename(
 
 
 @tag.command("normalize")
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to update.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--limit", type=int, default=200, show_default=True)
 @click.option("--offset", type=int, default=0, show_default=True)
 @click.option("--order-by", default=None)
@@ -4712,6 +4779,9 @@ def tag_normalize(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     limit: int,
     offset: int,
@@ -4737,6 +4807,8 @@ def tag_normalize(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -4745,7 +4817,15 @@ def tag_normalize(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     items = _collect_target_items(
         app,
         item_ids=resolved_item_ids,
@@ -4818,10 +4898,7 @@ def tag_normalize(
 
 @tag.command("alias-map-apply")
 @click.argument("alias_map_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to update.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--limit", type=int, default=200, show_default=True)
 @click.option("--offset", type=int, default=0, show_default=True)
 @click.option("--order-by", default=None)
@@ -4846,6 +4923,9 @@ def tag_alias_map_apply(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     limit: int,
     offset: int,
@@ -4869,6 +4949,8 @@ def tag_alias_map_apply(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -4877,7 +4959,15 @@ def tag_alias_map_apply(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     items = _collect_target_items(
         app,
         item_ids=resolved_item_ids,
@@ -5228,10 +5318,7 @@ def report_library(app: AppContext, output_file: Path, report_format: str) -> No
 @report.command("tags")
 @click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
 @click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html", "csv"]), default="auto", show_default=True)
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--top", type=click.IntRange(1, None), default=20, show_default=True)
 @item_filter_options
 @pass_app
@@ -5242,6 +5329,9 @@ def report_tags(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     top: int,
     limit: int,
@@ -5258,6 +5348,8 @@ def report_tags(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -5266,7 +5358,15 @@ def report_tags(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     query = _query_or_collect_items(
         app,
         item_ids=resolved_item_ids,
@@ -5308,10 +5408,7 @@ def report_tags(
 @report.command("folders")
 @click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
 @click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html", "csv"]), default="auto", show_default=True)
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--top", type=click.IntRange(1, None), default=20, show_default=True)
 @item_filter_options
 @pass_app
@@ -5322,6 +5419,9 @@ def report_folders(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     top: int,
     limit: int,
@@ -5340,6 +5440,8 @@ def report_folders(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -5348,7 +5450,15 @@ def report_folders(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     query = _query_or_collect_items(
         app,
         item_ids=resolved_item_ids,
@@ -5402,10 +5512,7 @@ def report_folders(
 @report.command("trend")
 @click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
 @click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html", "csv"]), default="auto", show_default=True)
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--bucket", type=click.Choice(["month", "year"]), default="month", show_default=True)
 @click.option("--field", type=click.Choice(["created", "modification"]), default="modification", show_default=True)
 @item_filter_options
@@ -5417,6 +5524,9 @@ def report_trend(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     bucket: str,
     field: str,
@@ -5434,6 +5544,8 @@ def report_trend(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -5442,7 +5554,15 @@ def report_trend(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     query = _query_or_collect_items(
         app,
         item_ids=resolved_item_ids,
@@ -5485,10 +5605,7 @@ def report_trend(
 @report.command("dashboard")
 @click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
 @click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html"]), default="auto", show_default=True)
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to inspect.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--top", type=click.IntRange(1, None), default=20, show_default=True)
 @click.option("--bucket", type=click.Choice(["month", "year"]), default="month", show_default=True)
 @click.option("--field", type=click.Choice(["created", "modification"]), default="modification", show_default=True)
@@ -5501,6 +5618,9 @@ def report_dashboard(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     top: int,
     bucket: str,
@@ -5519,6 +5639,8 @@ def report_dashboard(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -5527,7 +5649,15 @@ def report_dashboard(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     query = _query_or_collect_items(
         app,
         item_ids=resolved_item_ids,

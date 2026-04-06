@@ -12,7 +12,7 @@
   const logPath = path.join(stateRoot, "plugin.log");
   const pluginId = "2f40db08-5ce8-4d72-9fb7-a8fdcb5c1f6b";
   const pluginName = "CLI-Anything Eagle Bridge";
-  const pluginVersion = "0.13.0";
+  const pluginVersion = "0.13.1";
 
   const statusNode = document.getElementById("status");
   const statePathNode = document.getElementById("state-path");
@@ -239,15 +239,39 @@
     if (itemIds.length === 0) {
       return { selected: false, selected_count: 0, item_ids: [] };
     }
-    if (!eagle || !eagle.item || typeof eagle.item.select !== "function") {
-      throw new Error("eagle.item.select is not available in this plugin runtime.");
+    if (eagle && eagle.item && typeof eagle.item.select === "function") {
+      const selected = await eagle.item.select(itemIds);
+      return {
+        selected: Boolean(selected),
+        selected_count: itemIds.length,
+        item_ids: itemIds,
+        selection_method: "select",
+      };
     }
-    const selected = await eagle.item.select(itemIds);
-    return {
-      selected: Boolean(selected),
-      selected_count: itemIds.length,
-      item_ids: itemIds,
-    };
+    if (itemIds.length === 1 && eagle && eagle.item && typeof eagle.item.open === "function") {
+      await eagle.item.open(itemIds[0]);
+      const actualItemIds =
+        eagle && eagle.item && typeof eagle.item.getSelected === "function"
+          ? (await eagle.item.getSelected())
+              .map((item) => String(item && item.id ? item.id : ""))
+              .filter(Boolean)
+          : [];
+      const verified = actualItemIds.includes(itemIds[0]);
+      return {
+        selected: verified,
+        selected_count: verified ? 1 : 0,
+        item_ids: actualItemIds,
+        requested_item_ids: itemIds,
+        actual_selected_count: actualItemIds.length,
+        actual_selected_item_ids: actualItemIds,
+        selection_method: "open-fallback",
+        compatibility_warning:
+          "eagle.item.select is unavailable in this plugin runtime; single-item selection fell back to eagle.item.open(). Upgrade to Eagle 4.0 build12+ for programmatic multi-item selection.",
+      };
+    }
+    throw new Error(
+      "eagle.item.select is not available in this plugin runtime. Upgrade to Eagle 4.0 build12 or later for programmatic multi-item selection.",
+    );
   }
 
   async function handleOpenFolder(payload) {

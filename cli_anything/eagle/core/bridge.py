@@ -255,8 +255,15 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def bundled_companion_plugin_template_dir() -> Path:
+    return Path(__file__).resolve().parents[1] / "assets" / "companion-plugin"
+
+
 def companion_plugin_template_dir() -> Path:
-    return repo_root() / "companion-plugin"
+    repo_template_dir = repo_root() / "companion-plugin"
+    if repo_template_dir.exists():
+        return repo_template_dir
+    return bundled_companion_plugin_template_dir()
 
 
 def export_companion_plugin(destination: Path) -> Path:
@@ -265,6 +272,8 @@ def export_companion_plugin(destination: Path) -> Path:
     import shutil
 
     source = companion_plugin_template_dir()
+    if not source.exists():
+        raise FileNotFoundError(f"Companion plugin template directory does not exist: {source}")
     if destination.exists():
         shutil.rmtree(destination)
     shutil.copytree(source, destination)

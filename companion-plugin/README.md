@@ -7,6 +7,7 @@ Supported bridge actions:
 
 - `ping`
 - `get_context`
+- `get_selected_item_ids`
 - `select_items`
 - `open_folder`
 - `open_items`
@@ -30,7 +31,12 @@ Install from the main CLI project:
 ```bash
 cli-anything-eagle bridge install-plugin
 cli-anything-eagle --json bridge status
+cli-anything-eagle --json bridge selected-item-ids
 ```
+
+The main Python package now bundles this plugin template as installable package
+data, so `bridge export-plugin` and `bridge install-plugin` still work from
+plain wheel installs.
 
 If Eagle is already running, restart Eagle after installing the plugin so the
 service bridge can start and begin answering `bridge ping`, `bridge context`,

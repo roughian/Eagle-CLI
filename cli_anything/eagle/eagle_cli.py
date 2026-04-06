@@ -40,6 +40,12 @@ from cli_anything.eagle.core.config import (
     unset_config_value,
 )
 from cli_anything.eagle.core.files import atomic_write_json, atomic_write_text
+from cli_anything.eagle.core.selection import (
+    delete_selection_document,
+    list_selection_documents,
+    load_selection_document,
+    save_selection_document,
+)
 from cli_anything.eagle.core.state import DEFAULT_STATE_DIR, SessionState
 from cli_anything.eagle.core.storage import delete_preset, get_preset, load_presets, save_presets, set_preset
 from cli_anything.eagle.utils.folders import (
@@ -98,6 +104,37 @@ def item_filter_options(fn):
         click.option("--order-by", default=None, help="Examples: CREATEDATE, -FILESIZE, NAME, -RESOLUTION."),
         click.option("--offset", type=int, default=0, show_default=True),
         click.option("--limit", type=int, default=20, show_default=True),
+    ]
+    for option in options:
+        fn = option(fn)
+    return fn
+
+
+def item_selector_source_options(fn):
+    options = [
+        click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size."),
+        click.option(
+            "--current-selection",
+            "use_current_selection",
+            is_flag=True,
+            help="Reuse the current Eagle selection via the companion bridge plugin.",
+        ),
+        click.option(
+            "--current-selection-timeout",
+            type=float,
+            default=DEFAULT_WAIT_SECONDS,
+            show_default=True,
+            help="Seconds to wait for the companion bridge when --current-selection is used.",
+        ),
+        click.option("--selection", "selection_name", default=None, help="Load item IDs from a saved selection set."),
+        click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command."),
+        click.option(
+            "--item-file",
+            type=click.Path(exists=True, dir_okay=False, path_type=Path),
+            default=None,
+            help="Load item IDs from a file.",
+        ),
+        click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs."),
     ]
     for option in options:
         fn = option(fn)
@@ -596,7 +633,7 @@ def bridge_doctor(app: AppContext, timeout: float, skip_ping: bool) -> None:
     add_check(
         "install",
         bool(summary.get("installed_plugin_paths")),
-        "error",
+        "warning",
         "Companion plugin is installed." if summary.get("installed_plugin_paths") else "Companion plugin is not installed.",
         summary.get("installed_plugin_paths") or summary.get("default_plugin_dirs"),
     )
@@ -695,112 +732,6 @@ def bridge_doctor(app: AppContext, timeout: float, skip_ping: bool) -> None:
     )
 
 
-@bridge.command("context")
-@click.option("--item-limit", type=click.IntRange(1, None), default=20, show_default=True, help="Maximum number of selected items to return.")
-@click.option("--timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
-@pass_app
-def bridge_context(app: AppContext, item_limit: int, timeout: float) -> None:
-    bridge_result = _bridge_request("get_context", {"item_limit": item_limit}, timeout_seconds=timeout, queue_only=False)
-    payload = _bridge_response_data(bridge_result)
-    _emit_and_remember(
-        app,
-        "bridge context",
-        {
-            "status": "success",
-            "data": {
-                **bridge_result["data"],
-                **payload,
-            },
-        },
-    )
-
-
-@bridge.command("open-folder")
-@click.option("--folder-id", default=None, help="Folder ID.")
-@click.option("--folder-name", default=None, help="Exact folder name.")
-@click.option("--folder-path", default=None, help="Exact folder path.")
-@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
-@click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
-@pass_app
-def bridge_open_folder(
-    app: AppContext,
-    folder_id: str | None,
-    folder_name: str | None,
-    folder_path: str | None,
-    bridge_timeout: float,
-    queue_only: bool,
-) -> None:
-    target = _resolve_folder_selector(
-        app,
-        folder_id=folder_id,
-        folder_name=folder_name,
-        folder_path=folder_path,
-        purpose="folder",
-        required=True,
-    )
-    if app.dry_run:
-        _emit_and_remember(app, "bridge open-folder", {"status": "dry-run", "data": {"folder": _folder_row(target)}})
-        return
-    bridge_result = _bridge_request(
-        "open_folder",
-        {"folder_id": target.id},
-        timeout_seconds=bridge_timeout,
-        queue_only=queue_only,
-    )
-    _emit_and_remember(
-        app,
-        "bridge open-folder",
-        {
-            "status": bridge_result.get("status", "success"),
-            "data": {
-                "folder": _folder_row(target),
-                **bridge_result["data"],
-                "response": _bridge_response_data(bridge_result),
-            },
-        },
-    )
-
-
-@bridge.command("select-items")
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to select in Eagle.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
-@click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
-@pass_app
-def bridge_select_items(
-    app: AppContext,
-    item_ids: tuple[str, ...],
-    item_file: Path | None,
-    use_last: bool,
-    bridge_timeout: float,
-    queue_only: bool,
-) -> None:
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
-    items = _collect_target_items(
-        app,
-        item_ids=resolved_item_ids,
-        limit=max(len(resolved_item_ids), 1),
-        offset=0,
-        order_by=None,
-        keyword=None,
-        ext=None,
-        tags=(),
-        folders=(),
-        folder_names=(),
-        folder_paths=(),
-    )
-    result = _bridge_select_items_result(
-        app,
-        command_name="bridge select-items",
-        item_ids=[str(item.get("id")) for item in items if str(item.get("id"))],
-        bridge_timeout=bridge_timeout,
-        queue_only=queue_only,
-        extra_data={"matched_count": len(items)},
-    )
-    _emit_and_remember(app, "bridge select-items", result)
-
-
 @bridge.command("export-plugin")
 @click.argument("output_dir", type=click.Path(file_okay=False, path_type=Path))
 @pass_app
@@ -842,6 +773,25 @@ def bridge_install_plugin(app: AppContext, plugin_dir: Path | None) -> None:
 def bridge_ping(app: AppContext, timeout: float, queue_only: bool) -> None:
     result = _bridge_request("ping", {"base_url": app.base_url}, timeout_seconds=timeout, queue_only=queue_only)
     _emit_and_remember(app, "bridge ping", result)
+
+
+@bridge.command("selected-item-ids")
+@click.option("--timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@pass_app
+def bridge_selected_item_ids(app: AppContext, timeout: float) -> None:
+    result = _bridge_request("get_selected_item_ids", {}, timeout_seconds=timeout, queue_only=False)
+    payload = _bridge_response_data(result)
+    _emit_and_remember(
+        app,
+        "bridge selected-item-ids",
+        {
+            "status": result.get("status", "success"),
+            "data": {
+                "request_id": result["data"]["request_id"],
+                **payload,
+            },
+        },
+    )
 
 
 @bridge.command("context")
@@ -921,10 +871,7 @@ def bridge_open_folder(
 
 
 @bridge.command("select-items")
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to select inside Eagle.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--max-items", type=click.IntRange(1, None), default=None, help="Refuse to select more than this many items.")
 @click.option("--timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
 @click.option("--queue-only", is_flag=True, help="Queue the selection request without waiting for a response.")
@@ -935,6 +882,9 @@ def bridge_select_items(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     max_items: int | None,
     timeout: float,
@@ -953,6 +903,8 @@ def bridge_select_items(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -961,7 +913,15 @@ def bridge_select_items(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     items = _collect_target_items(
         app,
         item_ids=resolved_item_ids,
@@ -977,38 +937,15 @@ def bridge_select_items(
         folder_paths=folder_paths,
     )
     matched_count = _apply_item_guardrails(items, max_items=max_items, require_match=None, save_matches=None)
-    selected_ids = [str(item.get("id")) for item in items if str(item.get("id"))]
-    if not selected_ids:
-        raise click.ClickException("No items matched the requested selection.")
-    result = _bridge_request("select_items", {"item_ids": selected_ids}, timeout_seconds=timeout, queue_only=queue_only)
-    if result.get("status") != "success":
-        _emit_and_remember(
-            app,
-            "bridge select-items",
-            {
-                "status": result["status"],
-                "data": {
-                    "matched_count": matched_count,
-                    "sample_ids": selected_ids[:20],
-                    **result["data"],
-                },
-            },
-        )
-        return
-    payload = _bridge_response_data(result)
-    _emit_and_remember(
+    result = _bridge_select_items_result(
         app,
-        "bridge select-items",
-        {
-            "status": "success",
-            "data": {
-                "request_id": result["data"]["request_id"],
-                "matched_count": matched_count,
-                "sample_ids": selected_ids[:20],
-                **payload,
-            },
-        },
+        command_name="bridge select-items",
+        item_ids=[str(item.get("id")) for item in items if str(item.get("id"))],
+        bridge_timeout=timeout,
+        queue_only=queue_only,
+        extra_data={"matched_count": matched_count},
     )
+    _emit_and_remember(app, "bridge select-items", result)
 
 
 @bridge.command("cleanup")
@@ -1319,6 +1256,9 @@ def preset_run_bulk_update(app: AppContext, name: str, save_plan: Path | None) -
         item_ids=tuple(selector.get("item_ids") or []),
         item_file=None,
         use_last=False,
+        selection_name=selector.get("selection"),
+        use_current_selection=bool(selector.get("use_current_selection")),
+        current_selection_timeout=DEFAULT_WAIT_SECONDS,
         fetch_all=bool(selector.get("fetch_all")),
         limit=selector.get("limit", 200),
         offset=selector.get("offset", 0),
@@ -1350,10 +1290,7 @@ def snapshot() -> None:
 
 @snapshot.command("create")
 @click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to snapshot.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Capture all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @item_filter_options
 @pass_app
 def snapshot_create(
@@ -1362,6 +1299,9 @@ def snapshot_create(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     limit: int,
     offset: int,
@@ -1377,6 +1317,8 @@ def snapshot_create(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -1385,7 +1327,15 @@ def snapshot_create(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     items = _collect_target_items(
         app,
         item_ids=resolved_item_ids,
@@ -1417,6 +1367,9 @@ def snapshot_create(
                 folder_paths=folder_paths,
             ),
             "item_ids": list(resolved_item_ids),
+            "selection": selection_name,
+            "use_last": use_last,
+            "use_current_selection": use_current_selection,
         },
     )
     _write_snapshot(output_file, document)
@@ -2039,10 +1992,7 @@ def item_selected(app: AppContext, item_limit: int, bridge_timeout: float) -> No
 
 
 @item.command("select")
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to select in Eagle.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--max-items", type=click.IntRange(1, None), default=None, help="Refuse to continue if more than this many items match.")
 @click.option("--require-match", type=click.IntRange(1, None), default=None, help="Require at least this many matched items.")
 @click.option("--save-matches", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write matched items to a file before selecting them.")
@@ -2055,6 +2005,9 @@ def item_select(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     max_items: int | None,
     require_match: int | None,
@@ -2075,6 +2028,8 @@ def item_select(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -2083,7 +2038,15 @@ def item_select(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     items = _collect_target_items(
         app,
         item_ids=resolved_item_ids,
@@ -2110,6 +2073,9 @@ def item_select(
             "saved_matches": str(save_matches) if save_matches is not None else None,
             "selector": _item_selector_context(
                 item_ids=resolved_item_ids,
+                selection_name=selection_name,
+                use_last=use_last,
+                use_current_selection=use_current_selection,
                 fetch_all=fetch_all,
                 limit=limit,
                 offset=offset,
@@ -2127,10 +2093,7 @@ def item_select(
 
 
 @item.command("open")
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to open inside Eagle.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--window", is_flag=True, help="Ask Eagle to open each item in a new window when supported.")
 @click.option("--max-items", type=click.IntRange(1, None), default=None, help="Refuse to continue if more than this many items match.")
 @click.option("--require-match", type=click.IntRange(1, None), default=None, help="Require at least this many matched items.")
@@ -2144,6 +2107,9 @@ def item_open(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     window: bool,
     max_items: int | None,
@@ -2165,6 +2131,8 @@ def item_open(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -2173,7 +2141,15 @@ def item_open(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     items = _collect_target_items(
         app,
         item_ids=resolved_item_ids,
@@ -2375,10 +2351,7 @@ def item_update(
 
 
 @item.command("bulk-update")
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to update.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--limit", type=int, default=200, show_default=True)
 @click.option("--offset", type=int, default=0, show_default=True)
 @click.option("--order-by", default=None)
@@ -2404,6 +2377,9 @@ def item_bulk_update(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     limit: int,
     offset: int,
@@ -2430,6 +2406,9 @@ def item_bulk_update(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
         fetch_all=fetch_all,
         limit=limit,
         offset=offset,
@@ -2455,10 +2434,7 @@ def item_bulk_update(
 
 
 @item.command("rename-bulk")
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to rename.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--limit", type=int, default=200, show_default=True)
 @click.option("--offset", type=int, default=0, show_default=True)
 @click.option("--order-by", default=None)
@@ -2494,6 +2470,9 @@ def item_rename_bulk(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     limit: int,
     offset: int,
@@ -2525,6 +2504,8 @@ def item_rename_bulk(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -2533,7 +2514,15 @@ def item_rename_bulk(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     items = _collect_target_items(
         app,
         item_ids=resolved_item_ids,
@@ -2579,6 +2568,9 @@ def item_rename_bulk(
                 "skipped_count": len(skipped),
                 "selector": _item_selector_context(
                     item_ids=resolved_item_ids,
+                    selection_name=selection_name,
+                    use_last=use_last,
+                    use_current_selection=use_current_selection,
                     fetch_all=fetch_all,
                     limit=limit,
                     offset=offset,
@@ -2636,10 +2628,7 @@ def item_rename_bulk(
 
 
 @item.command("move-bulk")
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to move.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--limit", type=int, default=200, show_default=True)
 @click.option("--offset", type=int, default=0, show_default=True)
 @click.option("--order-by", default=None)
@@ -2667,6 +2656,9 @@ def item_move_bulk(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     limit: int,
     offset: int,
@@ -2694,6 +2686,8 @@ def item_move_bulk(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -2702,7 +2696,15 @@ def item_move_bulk(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     items = _collect_target_items(
         app,
         item_ids=resolved_item_ids,
@@ -2750,6 +2752,9 @@ def item_move_bulk(
                 "target_folder": _folder_row(folder),
                 "selector": _item_selector_context(
                     item_ids=resolved_item_ids,
+                    selection_name=selection_name,
+                    use_last=use_last,
+                    use_current_selection=use_current_selection,
                     fetch_all=fetch_all,
                     limit=limit,
                     offset=offset,
@@ -3598,10 +3603,7 @@ def organize() -> None:
 
 
 @organize.command("apply")
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to organize.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @click.option("--limit", type=int, default=200, show_default=True)
 @click.option("--offset", type=int, default=0, show_default=True)
 @click.option("--order-by", default=None)
@@ -3642,6 +3644,9 @@ def organize_apply(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     limit: int,
     offset: int,
@@ -3682,6 +3687,8 @@ def organize_apply(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -3690,7 +3697,15 @@ def organize_apply(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     items = _collect_target_items(
         app,
         item_ids=resolved_item_ids,
@@ -3725,6 +3740,9 @@ def organize_apply(
             item_ids=tuple(str(item.get("id")) for item in items if str(item.get("id"))),
             item_file=None,
             use_last=False,
+            selection_name=None,
+            use_current_selection=False,
+            current_selection_timeout=DEFAULT_WAIT_SECONDS,
             fetch_all=False,
             limit=len(items) or 1,
             offset=0,
@@ -3798,6 +3816,9 @@ def organize_apply(
                 "target_folder": _folder_row(target_folder),
                 "selector": _item_selector_context(
                     item_ids=resolved_item_ids,
+                    selection_name=selection_name,
+                    use_last=use_last,
+                    use_current_selection=use_current_selection,
                     fetch_all=fetch_all,
                     limit=limit,
                     offset=offset,
@@ -4934,15 +4955,12 @@ def select_group() -> None:
 @select_group.command("list")
 @pass_app
 def select_list(app: AppContext) -> None:
-    _emit_and_remember(app, "select list", {"status": "success", "data": _list_selections()})
+    _emit_and_remember(app, "select list", {"status": "success", "data": list_selection_documents(state_dir=DEFAULT_STATE_DIR)})
 
 
 @select_group.command("save")
 @click.argument("name")
-@click.option("--item-id", "item_ids", multiple=True, help="Explicit item IDs to save.")
-@click.option("--item-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Load item IDs from a file.")
-@click.option("--last", "use_last", is_flag=True, help="Reuse item IDs from the last item-producing command.")
-@click.option("--all", "fetch_all", is_flag=True, help="Fetch all matching items by paging with the current limit as page size.")
+@item_selector_source_options
 @item_filter_options
 @pass_app
 def select_save(
@@ -4951,6 +4969,9 @@ def select_save(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     limit: int,
     offset: int,
@@ -4966,6 +4987,8 @@ def select_save(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -4974,7 +4997,15 @@ def select_save(
         folder_names=folder_names,
         folder_paths=folder_paths,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
     items = _collect_target_items(
         app,
         item_ids=resolved_item_ids,
@@ -4990,12 +5021,16 @@ def select_save(
         folder_paths=folder_paths,
     )
     saved_ids = [str(item.get("id")) for item in items if str(item.get("id"))]
-    path = _save_selection(
+    path = save_selection_document(
         name,
         saved_ids,
+        state_dir=DEFAULT_STATE_DIR,
         context={
             "selector": _item_selector_context(
                 item_ids=resolved_item_ids,
+                selection_name=selection_name,
+                use_last=use_last,
+                use_current_selection=use_current_selection,
                 fetch_all=fetch_all,
                 limit=limit,
                 offset=offset,
@@ -5024,52 +5059,11 @@ def select_save(
     )
 
 
-@select_group.command("save-current")
-@click.argument("name")
-@click.option("--timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
-@click.option("--item-limit", type=click.IntRange(1, None), default=200, show_default=True, help="Maximum selected items to fetch from Eagle before saving the selection.")
-@pass_app
-def select_save_current(app: AppContext, name: str, timeout: float, item_limit: int) -> None:
-    result = _bridge_request("get_context", {"item_limit": item_limit}, timeout_seconds=timeout, queue_only=False)
-    payload = _bridge_response_data(result)
-    selected_items = [item for item in payload.get("selected_items") or [] if isinstance(item, dict)]
-    saved_ids = [str(item.get("id")) for item in selected_items if str(item.get("id"))]
-    if not saved_ids:
-        raise click.ClickException("The Eagle plugin did not report any selected items.")
-    path = _save_selection(
-        name,
-        saved_ids,
-        context={
-            "source": "bridge-current-selection",
-            "request_id": result["data"]["request_id"],
-            "selected_item_count": payload.get("selected_item_count"),
-            "selected_folder_ids": [str(folder.get("id")) for folder in payload.get("selected_folders") or [] if str(folder.get("id"))],
-            "truncated_items": bool(payload.get("truncated_items")),
-        },
-    )
-    _emit_and_remember(
-        app,
-        "select save-current",
-        {
-            "status": "success",
-            "data": {
-                "name": name,
-                "saved_to": str(path),
-                "item_count": len(saved_ids),
-                "selected_item_count": payload.get("selected_item_count", len(saved_ids)),
-                "selected_folder_count": payload.get("selected_folder_count", 0),
-                "truncated_items": bool(payload.get("truncated_items")),
-                "sample_ids": saved_ids[:10],
-            },
-        },
-    )
-
-
 @select_group.command("show")
 @click.argument("name")
 @pass_app
 def select_show(app: AppContext, name: str) -> None:
-    _emit_and_remember(app, "select show", {"status": "success", "data": _load_selection(name)})
+    _emit_and_remember(app, "select show", {"status": "success", "data": _selection_document_or_error(name)})
 
 
 @select_group.command("capture")
@@ -5096,7 +5090,7 @@ def select_save_current(app: AppContext, name: str, item_limit: int, bridge_time
 @click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
 @pass_app
 def select_apply(app: AppContext, name: str, bridge_timeout: float, queue_only: bool) -> None:
-    payload = _load_selection(name)
+    payload = _selection_document_or_error(name)
     item_ids = [str(item_id) for item_id in payload.get("item_ids") or [] if str(item_id)]
     result = _bridge_select_items_result(
         app,
@@ -5113,7 +5107,7 @@ def select_apply(app: AppContext, name: str, bridge_timeout: float, queue_only: 
 @click.argument("name")
 @pass_app
 def select_delete(app: AppContext, name: str) -> None:
-    if not _delete_selection(name):
+    if not delete_selection_document(name, state_dir=DEFAULT_STATE_DIR):
         raise click.ClickException(f"Unknown selection: {name}")
     _emit_and_remember(app, "select delete", {"status": "success", "data": {"deleted": name}})
 
@@ -5125,7 +5119,7 @@ def select_delete(app: AppContext, name: str) -> None:
 @click.option("--resolve", is_flag=True, help="Resolve the sampled IDs to full Eagle item records.")
 @pass_app
 def select_sample(app: AppContext, name: str, count: int, offset: int, resolve: bool) -> None:
-    payload = _load_selection(name)
+    payload = _selection_document_or_error(name)
     item_ids = [str(item_id) for item_id in payload.get("item_ids") or [] if str(item_id)]
     sample_ids = item_ids[offset : offset + count]
     rows: Any
@@ -5166,8 +5160,8 @@ def select_sample(app: AppContext, name: str, count: int, offset: int, resolve: 
 @click.argument("right")
 @pass_app
 def select_diff(app: AppContext, left: str, right: str) -> None:
-    left_doc = _load_selection(left)
-    right_doc = _load_selection(right)
+    left_doc = _selection_document_or_error(left)
+    right_doc = _selection_document_or_error(right)
     left_ids = [str(item_id) for item_id in left_doc.get("item_ids") or [] if str(item_id)]
     right_ids = [str(item_id) for item_id in right_doc.get("item_ids") or [] if str(item_id)]
     left_set = set(left_ids)
@@ -6309,6 +6303,9 @@ def _bulk_update_result(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
     fetch_all: bool,
     limit: int,
     offset: int,
@@ -6334,6 +6331,8 @@ def _bulk_update_result(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -6347,7 +6346,15 @@ def _bulk_update_result(
         source_url=source_url,
         star=star,
     )
-    resolved_item_ids = _resolve_item_selector_ids(app, item_ids=item_ids, item_file=item_file, use_last=use_last)
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
 
     source_items = _collect_target_items(
         app,
@@ -6436,6 +6443,9 @@ def _bulk_update_result(
                         folder_paths=folder_paths,
                     ),
                     "item_ids": list(resolved_item_ids),
+                    "selection": selection_name,
+                    "use_last": use_last,
+                    "use_current_selection": use_current_selection,
                     "fetch_all": fetch_all,
                 },
             ),
@@ -6493,6 +6503,8 @@ def _validate_bulk_update_request(
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
     fetch_all: bool,
     keyword: str | None,
     ext: str | None,
@@ -6512,6 +6524,8 @@ def _validate_bulk_update_request(
         item_ids=item_ids,
         item_file=item_file,
         use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
         fetch_all=fetch_all,
         keyword=keyword,
         ext=ext,
@@ -6540,6 +6554,8 @@ def _validate_item_selector_request(
     item_ids: tuple[str, ...],
     item_file: Path | None = None,
     use_last: bool = False,
+    selection_name: str | None = None,
+    use_current_selection: bool = False,
     fetch_all: bool,
     keyword: str | None,
     ext: str | None,
@@ -6548,9 +6564,11 @@ def _validate_item_selector_request(
     folder_names: tuple[str, ...],
     folder_paths: tuple[str, ...],
 ) -> None:
-    has_direct_selector = bool(item_ids) or item_file is not None or use_last
+    has_direct_selector = bool(item_ids) or item_file is not None or use_last or bool(selection_name) or use_current_selection
     if has_direct_selector and any([fetch_all, keyword, ext, tags, folders, folder_names, folder_paths]):
-        raise click.ClickException("Use either explicit item selectors (--item-id/--item-file/--last) or filters, not both.")
+        raise click.ClickException(
+            "Use either explicit item selectors (--item-id/--item-file/--selection/--current-selection/--last) or filters, not both."
+        )
     if not has_direct_selector and not fetch_all and not any([keyword, ext, tags, folders, folder_names, folder_paths]):
         raise click.ClickException("Provide explicit --item-id values, at least one filter, or --all.")
 
@@ -6606,32 +6624,33 @@ def _snapshot_summary(document: dict[str, Any]) -> dict[str, Any]:
 
 def _bridge_status_payload() -> dict[str, Any]:
     summary = bridge_health()
+    layout = summary.get("layout") or {}
     return {
         "plugin_id": BRIDGE_PLUGIN_ID,
         "plugin_name": BRIDGE_PLUGIN_NAME,
-        "template_dir": summary["template_dir"],
-        "template_exists": summary["template_exists"],
-        "state_dir": summary["layout"]["state_dir"],
-        "request_dir": summary["layout"]["requests"],
-        "response_dir": summary["layout"]["responses"],
-        "processed_dir": summary["layout"]["processed"],
-        "status_path": summary["status_path"],
-        "log_path": summary["log_path"],
-        "log_exists": summary["log_exists"],
-        "installed_plugin_paths": summary["installed_plugin_paths"],
-        "default_plugin_dirs": summary["default_plugin_dirs"],
-        "health": summary["health"],
-        "heartbeat_age_seconds": summary["heartbeat_age_seconds"],
-        "queue_depth": summary["queue_depth"],
-        "pending_request_count": summary["pending_request_count"],
-        "pending_response_count": summary["pending_response_count"],
-        "processed_count": summary["processed_count"],
-        "writable": summary["writable"],
-        "status_error": summary["status_error"],
-        "plugin_version": summary["plugin_version"],
+        "template_dir": summary.get("template_dir"),
+        "template_exists": summary.get("template_exists", False),
+        "state_dir": layout.get("state_dir"),
+        "request_dir": layout.get("requests"),
+        "response_dir": layout.get("responses"),
+        "processed_dir": layout.get("processed"),
+        "status_path": summary.get("status_path"),
+        "log_path": summary.get("log_path"),
+        "log_exists": summary.get("log_exists", False),
+        "installed_plugin_paths": summary.get("installed_plugin_paths") or [],
+        "default_plugin_dirs": summary.get("default_plugin_dirs") or [],
+        "health": summary.get("health"),
+        "heartbeat_age_seconds": summary.get("heartbeat_age_seconds"),
+        "queue_depth": summary.get("queue_depth", 0),
+        "pending_request_count": summary.get("pending_request_count", 0),
+        "pending_response_count": summary.get("pending_response_count", 0),
+        "processed_count": summary.get("processed_count", 0),
+        "writable": summary.get("writable") or {},
+        "status_error": summary.get("status_error"),
+        "plugin_version": summary.get("plugin_version"),
         "cli_version": __version__,
-        "version_mismatch": bool(summary["plugin_version"]) and summary["plugin_version"] != __version__,
-        "status": summary["status"],
+        "version_mismatch": bool(summary.get("plugin_version")) and summary.get("plugin_version") != __version__,
+        "status": summary.get("status"),
     }
 
 
@@ -6709,27 +6728,20 @@ def _bridge_select_items_result(
 
 
 def _save_current_selection_result(app: AppContext, *, name: str, item_limit: int, bridge_timeout: float) -> dict[str, Any]:
-    bridge_result = _bridge_request("get_context", {"item_limit": item_limit}, timeout_seconds=bridge_timeout, queue_only=False)
-    payload = _bridge_response_data(bridge_result)
-    item_ids = [str(item.get("id")) for item in payload.get("selected_items") or [] if str(item.get("id"))]
-    if not item_ids:
-        raise click.ClickException("No selected Eagle items were returned by the companion plugin.")
+    item_ids = list(_current_selection_item_ids(app, bridge_timeout=bridge_timeout))
     data = {
         "name": name,
         "item_count": len(item_ids),
         "sample_ids": item_ids[:10],
-        "selected_folder_count": payload.get("selected_folder_count", 0),
-        "request_id": bridge_result["data"].get("request_id"),
     }
     if app.dry_run:
         return {"status": "dry-run", "data": data}
-    path = _save_selection(
+    path = save_selection_document(
         name,
         item_ids,
+        state_dir=DEFAULT_STATE_DIR,
         context={
             "source": "bridge-capture",
-            "selected_folder_count": payload.get("selected_folder_count", 0),
-            "selected_folders": payload.get("selected_folders") or [],
         },
     )
     return {
@@ -6739,6 +6751,13 @@ def _save_current_selection_result(app: AppContext, *, name: str, item_limit: in
             "saved_to": str(path),
         },
     }
+
+
+def _selection_document_or_error(name: str) -> dict[str, Any]:
+    try:
+        return load_selection_document(name, state_dir=DEFAULT_STATE_DIR)
+    except FileNotFoundError as exc:
+        raise click.ClickException(f"Unknown selection: {name}") from exc
 
 
 def _bridge_request(
@@ -7231,6 +7250,9 @@ def _collect_target_items(
 def _item_selector_context(
     *,
     item_ids: tuple[str, ...],
+    selection_name: str | None,
+    use_last: bool,
+    use_current_selection: bool,
     fetch_all: bool,
     limit: int,
     offset: int,
@@ -7242,8 +7264,14 @@ def _item_selector_context(
     folder_names: tuple[str, ...],
     folder_paths: tuple[str, ...],
 ) -> dict[str, Any]:
-    if item_ids:
-        return {"item_ids": list(item_ids)}
+    direct_selector = {
+        "item_ids": list(item_ids),
+        "selection": selection_name,
+        "use_last": use_last,
+        "use_current_selection": use_current_selection,
+    }
+    if direct_selector["item_ids"] or direct_selector["selection"] or direct_selector["use_last"] or direct_selector["use_current_selection"]:
+        return direct_selector
     return {
         "fetch_all": fetch_all,
         "filters": _item_filter_payload_from_args(
@@ -7289,16 +7317,39 @@ def _organize_plan_operations(
     return operations
 
 
+def _current_selection_item_ids(app: AppContext, *, bridge_timeout: float) -> tuple[str, ...]:
+    result = _bridge_request("get_selected_item_ids", {}, timeout_seconds=bridge_timeout, queue_only=False)
+    payload = _bridge_response_data(result)
+    item_ids = tuple(_unique_preserve_order([str(item_id) for item_id in payload.get("item_ids") or [] if str(item_id)]))
+    if not item_ids:
+        item_ids = tuple(
+            _unique_preserve_order(
+                [str(item.get("id")) for item in payload.get("selected_items") or [] if str(item.get("id"))]
+            )
+        )
+    if not item_ids:
+        raise click.ClickException("The companion plugin did not report any currently selected Eagle items.")
+    return item_ids
+
+
 def _resolve_item_selector_ids(
     app: AppContext,
     *,
     item_ids: tuple[str, ...],
     item_file: Path | None,
     use_last: bool,
+    selection_name: str | None = None,
+    use_current_selection: bool = False,
+    current_selection_timeout: float = DEFAULT_WAIT_SECONDS,
 ) -> tuple[str, ...]:
     resolved = [str(item_id) for item_id in item_ids if str(item_id)]
     if item_file is not None:
         resolved.extend(_load_item_ids_from_file(item_file))
+    if selection_name:
+        payload = _selection_document_or_error(selection_name)
+        resolved.extend(str(item_id) for item_id in payload.get("item_ids") or [] if str(item_id))
+    if use_current_selection:
+        resolved.extend(_current_selection_item_ids(app, bridge_timeout=current_selection_timeout))
     if use_last:
         if not app.state.last_item_ids:
             raise click.ClickException("No item IDs are available from the last command.")
@@ -8241,70 +8292,6 @@ def _execute_operations(
             }
         )
     return results
-
-
-def _safe_name(name: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")
-    return cleaned or "selection"
-
-
-def _selection_dir() -> Path:
-    path = DEFAULT_STATE_DIR / "selections"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _selection_path(name: str) -> Path:
-    return _selection_dir() / f"{_safe_name(name)}.json"
-
-
-def _selection_document(name: str, item_ids: list[str], *, context: dict[str, Any] | None = None) -> dict[str, Any]:
-    return {
-        "kind": "eagle-cli-selection",
-        "version": 1,
-        "name": name,
-        "created_at": _utc_now(),
-        "item_ids": item_ids,
-        "item_count": len(item_ids),
-        "sample_ids": item_ids[:10],
-        "context": context or {},
-    }
-
-
-def _save_selection(name: str, item_ids: list[str], *, context: dict[str, Any] | None = None) -> Path:
-    path = _selection_path(name)
-    _write_manifest(path, _selection_document(name, item_ids, context=context))
-    return path
-
-
-def _load_selection(name: str) -> dict[str, Any]:
-    path = _selection_path(name)
-    if not path.exists():
-        raise click.ClickException(f"Unknown selection: {name}")
-    return _load_data_file(path)
-
-
-def _list_selections() -> list[dict[str, Any]]:
-    selections = []
-    for path in sorted(_selection_dir().glob("*.json")):
-        payload = _load_data_file(path)
-        selections.append(
-            {
-                "name": payload.get("name") or path.stem,
-                "item_count": payload.get("item_count", len(payload.get("item_ids") or [])),
-                "created_at": payload.get("created_at"),
-                "path": str(path),
-            }
-        )
-    return selections
-
-
-def _delete_selection(name: str) -> bool:
-    path = _selection_path(name)
-    if not path.exists():
-        return False
-    path.unlink()
-    return True
 
 
 def _load_data_file(path: Path) -> Any:

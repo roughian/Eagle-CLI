@@ -2,6 +2,11 @@
 
 This changelog summarizes the releases already reflected in the repository history and documentation.
 
+## 0.13.0
+- Bundled the companion bridge plugin template inside the Python package so `bridge export-plugin` and `bridge install-plugin` keep working from non-editable `pip` and `pipx` installs.
+- Added the missing `get_selected_item_ids` bridge action plus a new `bridge selected-item-ids` command, which restores `--current-selection` workflows across bulk-update, rename, move, organize, and saved-selection commands.
+- Continued the CLI cleanup by routing saved-selection persistence through the dedicated core selection module instead of duplicated inline helpers.
+
 ## 0.12.2
 - Reduced bridge heartbeat payloads so `status.json`, `bridge status`, and `bridge ping` report compact library summaries instead of the full Eagle folder tree.
 - Kept the companion plugin version aligned with the CLI after the live-bridge restart verification pass.

@@ -273,6 +273,53 @@ class EagleCliTests(unittest.TestCase):
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
     @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_item_bulk_update_current_selection_dry_run_uses_plugin_ids(
+        self, mock_bridge_request, mock_item_info, mock_load, _mock_save
+    ):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-current-selection",
+                "response": {
+                    "status": "success",
+                    "data": {"item_ids": ["abc", "def"], "selected_count": 2},
+                },
+            },
+        }
+        mock_item_info.side_effect = [
+            {"status": "success", "data": {"id": "abc", "name": "A", "tags": ["old"]}},
+            {"status": "success", "data": {"id": "def", "name": "B", "tags": []}},
+        ]
+        result = self.runner.invoke(
+            cli,
+            [
+                "--json",
+                "--dry-run",
+                "item",
+                "bulk-update",
+                "--current-selection",
+                "--add-tag",
+                "reviewed",
+            ],
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["matched_count"], 2)
+        self.assertEqual(payload["data"]["operation_count"], 2)
+        mock_bridge_request.assert_called_once_with(
+            "get_selected_item_ids",
+            {},
+            timeout_seconds=15.0,
+            queue_only=False,
+        )
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
     def test_item_bulk_update_loads_item_ids_from_file(self, mock_item_info, mock_load, _mock_save):
         from cli_anything.eagle.core.state import SessionState
 
@@ -498,6 +545,20 @@ class EagleCliTests(unittest.TestCase):
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.core.bridge.repo_root")
+    def test_companion_plugin_template_dir_falls_back_to_bundled_assets(self, mock_repo_root, mock_load, _mock_save):
+        from cli_anything.eagle.core.bridge import companion_plugin_template_dir
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_repo_root.return_value = Path("/tmp/cli-anything-eagle-missing-root")
+        template_dir = companion_plugin_template_dir()
+        self.assertTrue(template_dir.exists())
+        self.assertTrue((template_dir / "manifest.json").exists())
+        self.assertTrue((template_dir / "plugin.js").exists())
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
     @patch("cli_anything.eagle.eagle_cli.bridge_health")
     def test_bridge_status_reports_health_summary(self, mock_bridge_health, mock_load, _mock_save):
         from cli_anything.eagle import __version__
@@ -720,6 +781,34 @@ class EagleCliTests(unittest.TestCase):
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
     @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_bridge_selected_item_ids_reads_plugin_selection_ids(self, mock_bridge_request, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-selected-ids",
+                "response": {
+                    "status": "success",
+                    "data": {"item_ids": ["abc", "def"], "selected_count": 2},
+                },
+            },
+        }
+        result = self.runner.invoke(cli, ["--json", "bridge", "selected-item-ids"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["item_ids"], ["abc", "def"])
+        mock_bridge_request.assert_called_once_with(
+            "get_selected_item_ids",
+            {},
+            timeout_seconds=15.0,
+            queue_only=False,
+        )
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
     @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
     def test_bridge_open_folder_resolves_path_and_calls_bridge(self, mock_folder_list, mock_bridge_request, mock_load, _mock_save):
         from cli_anything.eagle.core.state import SessionState
@@ -770,6 +859,40 @@ class EagleCliTests(unittest.TestCase):
         payload = json.loads(result.output)
         self.assertEqual(payload["data"]["matched_count"], 2)
         self.assertEqual(payload["data"]["selected_count"], 2)
+        self.assertEqual(mock_bridge_request.call_args.args[0], "select_items")
+        self.assertEqual(mock_bridge_request.call_args.args[1], {"item_ids": ["abc", "def"]})
+
+    @patch("cli_anything.eagle.eagle_cli.DEFAULT_STATE_DIR", Path(".state"))
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    def test_bridge_select_items_accepts_saved_selection_name(self, mock_item_info, mock_bridge_request, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_info.side_effect = [
+            {"status": "success", "data": {"id": "abc", "name": "A"}},
+            {"status": "success", "data": {"id": "def", "name": "B"}},
+        ]
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-selection",
+                "response": {
+                    "status": "success",
+                    "data": {"selected": True, "selected_count": 2, "item_ids": ["abc", "def"]},
+                },
+            },
+        }
+        with self.runner.isolated_filesystem():
+            Path(".state/selections").mkdir(parents=True, exist_ok=True)
+            Path(".state/selections/active.json").write_text(
+                json.dumps({"kind": "eagle-cli-selection", "name": "active", "item_ids": ["abc", "def"]}),
+                encoding="utf-8",
+            )
+            result = self.runner.invoke(cli, ["--json", "bridge", "select-items", "--selection", "active"])
+        self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(mock_bridge_request.call_args.args[0], "select_items")
         self.assertEqual(mock_bridge_request.call_args.args[1], {"item_ids": ["abc", "def"]})
 
@@ -887,6 +1010,41 @@ class EagleCliTests(unittest.TestCase):
         mock_bridge_request.assert_called_once_with(
             "open_items",
             {"item_ids": ["abc"], "window": True},
+            timeout_seconds=15.0,
+            queue_only=False,
+        )
+
+    @patch("cli_anything.eagle.eagle_cli.DEFAULT_STATE_DIR", Path(".state"))
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    def test_item_open_accepts_saved_selection_name(self, mock_item_info, mock_bridge_request, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_info.side_effect = [
+            {"status": "success", "data": {"id": "a", "name": "A"}},
+            {"status": "success", "data": {"id": "b", "name": "B"}},
+        ]
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-open-selection",
+                "response": {"status": "success", "data": {"opened": True, "opened_count": 2}},
+            },
+        }
+        with self.runner.isolated_filesystem():
+            Path(".state/selections").mkdir(parents=True, exist_ok=True)
+            Path(".state/selections/favorites.json").write_text(
+                json.dumps({"kind": "eagle-cli-selection", "name": "favorites", "item_ids": ["a", "b"]}),
+                encoding="utf-8",
+            )
+            result = self.runner.invoke(cli, ["--json", "item", "open", "--selection", "favorites"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_bridge_request.assert_called_once_with(
+            "open_items",
+            {"item_ids": ["a", "b"], "window": False},
             timeout_seconds=15.0,
             queue_only=False,
         )

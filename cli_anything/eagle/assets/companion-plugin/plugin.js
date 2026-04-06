@@ -224,11 +224,8 @@
     const items = await eagle.item.getSelected();
     const itemIds = items.map((item) => String(item && item.id ? item.id : "")).filter(Boolean);
     return {
-      selected: itemIds.length > 0,
       item_ids: itemIds,
       selected_count: itemIds.length,
-      selected_item_count: itemIds.length,
-      status: await collectStatus(),
     };
   }
 

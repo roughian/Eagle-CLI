@@ -75,10 +75,12 @@ python3 -m cli_anything.eagle.eagle_cli --json completion script --shell zsh --o
 python3 -m cli_anything.eagle.eagle_cli --json schema show workflow --output ./schemas/workflow.json
 python3 -m cli_anything.eagle.eagle_cli --json bridge export-plugin ./bridge-plugin
 python3 -m cli_anything.eagle.eagle_cli --json bridge status
+python3 -m cli_anything.eagle.eagle_cli --json bridge selected-item-ids
 python3 -m cli_anything.eagle.eagle_cli --json bridge doctor --skip-ping
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run bridge cleanup --max-age-hours 0
 python3 -m cli_anything.eagle.eagle_cli --json item selected
 python3 -m cli_anything.eagle.eagle_cli --json folder selected
+python3 -m cli_anything.eagle.eagle_cli --json --dry-run item bulk-update --current-selection --add-tag reviewed
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run item open --item-id EXAMPLE --window
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run tag rename-live "Old Tag" "New Tag"
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run tag merge-live "Legacy Tag" "Canonical Tag"
@@ -102,6 +104,14 @@ python3 -m cli_anything.eagle.eagle_cli report dashboard --help
 
 ## Result
 
+- `0.13.0` checks passed for:
+  - `python3 -m unittest discover -s tests -v`
+  - `node --check companion-plugin/plugin.js`
+  - `node --check cli_anything/eagle/assets/companion-plugin/plugin.js`
+  - `python3 -m cli_anything.eagle.eagle_cli --json bridge selected-item-ids`
+  - `python3 -m cli_anything.eagle.eagle_cli --json --dry-run item bulk-update --current-selection --add-tag reviewed`
+  - isolated build env plus `python -m build`
+  - fresh-venv install from the local repo plus `python -m cli_anything.eagle.eagle_cli --json bridge export-plugin <tmp>/plugin-copy`
 - `0.12.2` live smoke checks passed for:
   - Eagle restart after `bridge install-plugin`
   - `python3 -m cli_anything.eagle.eagle_cli --json bridge status`

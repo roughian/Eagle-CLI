@@ -40,8 +40,12 @@ For local development:
 ```bash
 git clone https://github.com/roughian/CLI-Anything-Eagle.git
 cd CLI-Anything-Eagle
-python3 -m pip install -e .
+python3 -m pip install -e ".[dev]"
 ```
+
+The companion bridge plugin template is bundled into the installed Python
+package, so `bridge export-plugin` and `bridge install-plugin` keep working
+from plain `pip` or `pipx` installs too.
 
 If the `cli-anything-eagle` script is not on your shell `PATH`, you can still run:
 
@@ -70,6 +74,7 @@ cli-anything-eagle --json config show
 cli-anything-eagle report dashboard ./reports/dashboard.md --format md --all
 cli-anything-eagle --json workflow validate ./workflow.yml
 cli-anything-eagle --json bridge status
+cli-anything-eagle --json bridge selected-item-ids
 cli-anything-eagle --json bridge doctor --skip-ping
 cli-anything-eagle --json item selected
 cli-anything-eagle --json folder selected
@@ -242,6 +247,16 @@ cli-anything-eagle --dry-run item rename-bulk --folder-name References --prefix 
 cli-anything-eagle --dry-run item move-bulk --tag reviewed --target-folder-path "Archive/Reviewed"
 ```
 
+Operate directly on the current Eagle UI selection:
+
+```bash
+cli-anything-eagle --json bridge selected-item-ids
+cli-anything-eagle --dry-run item bulk-update --current-selection --add-tag reviewed
+cli-anything-eagle --dry-run item rename-bulk --current-selection --prefix archived-
+cli-anything-eagle --dry-run item move-bulk --current-selection --target-folder-path "Archive/Reviewed"
+cli-anything-eagle --dry-run organize apply --current-selection --add-tag reviewed --name-prefix ui-
+```
+
 Audit duplicate candidates and cleanup hotspots:
 
 ```bash
@@ -368,7 +383,7 @@ cli-anything-eagle config unset completion_shell
 - `snapshot create`, `show`, `diff`, `restore`
 - `audit duplicates`, `cleanup`, `cleanup-plan`, `dedupe-plan`
 - `organize apply`
-- `bridge status`, `doctor`, `context`, `open-folder`, `select-items`, `cleanup`, `export-plugin`, `install-plugin`, `ping`
+- `bridge status`, `doctor`, `context`, `selected-item-ids`, `open-folder`, `select-items`, `cleanup`, `export-plugin`, `install-plugin`, `ping`
 - `workflow validate`, `run`
 - `ingest manifest`
 - `watch import-dir`
@@ -414,9 +429,14 @@ cli-anything-eagle config unset completion_shell
   directory. When no explicit plugin directory is passed, it now refreshes all
   detected Eagle plugin roots. If Eagle is already open, restart it once so the
   background bridge can start.
+- The companion plugin template is bundled inside the Python package under
+  `cli_anything/eagle/assets/companion-plugin`, so wheel installs can still
+  export and install the plugin without a checked-out repository tree.
 - `bridge status` and `bridge doctor` now summarize heartbeat freshness, queue
   backlog, writable bridge directories, and whether the installed plugin build
   matches the current CLI version.
+- `bridge selected-item-ids` is the narrowest bridge probe for selection-based
+  workflows and is also what `--current-selection` uses internally.
 - `item selected` and `folder selected` read the current Eagle UI selection
   through the companion plugin. `item open`, `tag rename-live`, and
   `tag merge-live` also require the plugin bridge to be active.

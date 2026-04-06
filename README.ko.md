@@ -2,42 +2,39 @@
 
 [English](./README.md) | [한국어](./README.ko.md)
 
-`cli-anything-eagle` is a broad command-line interface for the Eagle desktop
-app. It targets Eagle's local HTTP API and exposes practical commands for app
-info, library management, folder workflows, smart-folder rule inspection, item
-ingestion, bulk edits, reusable presets, preset bundles, item export,
-operation plans, query stats, rollback snapshots, snapshot diffs, duplicate and
-cleanup audits, duplicate cleanup plan generation, tag audits and normalization,
-saved selection sets, reusable reports, declarative workflows, manifest-driven
-ingestion, incremental import watching, plan merge/filter/split/validate
-tooling, shell-completion helpers, document schemas, persistent config defaults,
-dashboard reports, high-level organize flows,
-and a companion bridge plugin for selection, open, tag, name, and folder
-operations that are not available through the local HTTP API alone, plus bridge
-health diagnostics and cleanup helpers.
+`cli-anything-eagle`은 Eagle 데스크톱 앱을 위한 폭넓은 커맨드라인 인터페이스입니다.
+Eagle의 로컬 HTTP API를 대상으로 하며, 앱 정보 조회, 라이브러리 관리, 폴더 워크플로우,
+스마트 폴더 규칙 점검, 아이템 가져오기, 일괄 수정, 재사용 가능한 프리셋, 프리셋 번들,
+아이템 내보내기, 작업 계획(plan), 쿼리 통계, 롤백 스냅샷, 스냅샷 diff, 중복 및 정리 audit,
+중복 정리 plan 생성, 태그 audit 및 정규화, 저장된 selection 세트, 재사용 가능한 리포트,
+선언형 workflow, manifest 기반 가져오기, 증분 import watch, plan merge/filter/split/validate,
+셸 completion, 문서 schema, 영구 config 기본값, 대시보드 리포트, 고수준 organize 흐름을 제공합니다.
 
-## Requirements
+또한 로컬 HTTP API만으로는 어려운 selection, open, 태그, 이름, 폴더 조작을 위해 companion
+bridge plugin도 함께 지원하며, bridge 상태 진단과 정리 도구도 포함합니다.
 
-- Eagle desktop app running locally
-- Eagle API listening on `http://localhost:41595`
-- Python 3.10+
-- `curl` available on the local machine
+## 요구 사항
 
-## Install
+- 로컬에서 실행 중인 Eagle 데스크톱 앱
+- `http://localhost:41595`에서 응답하는 Eagle API
+- Python 3.10 이상
+- 로컬 머신에서 사용 가능한 `curl`
 
-Recommended for general users:
+## 설치
+
+일반 사용자에게 권장하는 설치:
 
 ```bash
 python3 -m pip install "git+https://github.com/roughian/CLI-Anything-Eagle.git"
 ```
 
-Recommended for a cleaner CLI-only install:
+CLI 전용으로 깔끔하게 쓰고 싶다면:
 
 ```bash
 pipx install "git+https://github.com/roughian/CLI-Anything-Eagle.git"
 ```
 
-For local development:
+로컬 개발용 설치:
 
 ```bash
 git clone https://github.com/roughian/CLI-Anything-Eagle.git
@@ -45,17 +42,16 @@ cd CLI-Anything-Eagle
 python3 -m pip install -e ".[dev]"
 ```
 
-The companion bridge plugin template is bundled into the installed Python
-package, so `bridge export-plugin` and `bridge install-plugin` keep working
-from plain `pip` or `pipx` installs too.
+companion bridge plugin 템플릿은 설치된 Python 패키지 안에도 번들되어 있으므로,
+일반 `pip` 또는 `pipx` 설치에서도 `bridge export-plugin`, `bridge install-plugin`을 그대로 사용할 수 있습니다.
 
-If the `cli-anything-eagle` script is not on your shell `PATH`, you can still run:
+셸 `PATH`에 `cli-anything-eagle`이 없다면 아래처럼 실행해도 됩니다.
 
 ```bash
 python3 -m cli_anything.eagle.eagle_cli --help
 ```
 
-## Quick Start
+## 빠른 시작
 
 ```bash
 cli-anything-eagle doctor
@@ -86,13 +82,12 @@ cli-anything-eagle --json item selected
 cli-anything-eagle --json folder selected
 ```
 
-If the bridge plugin still shows `offline`, check the reported `log_path` after
-restarting Eagle. The plugin now writes a persistent `plugin.log` file inside
-`~/.config/cli-anything-eagle/bridge/`.
+bridge plugin 상태가 계속 `offline`이라면 Eagle을 재시작한 뒤 출력에 보이는 `log_path`를 확인하세요.
+plugin은 `~/.config/cli-anything-eagle/bridge/` 아래에 지속적인 `plugin.log`를 기록합니다.
 
-## Useful Workflows
+## 유용한 워크플로우
 
-Inspect the local Eagle API and version:
+로컬 Eagle API와 버전 확인:
 
 ```bash
 cli-anything-eagle doctor
@@ -101,7 +96,7 @@ cli-anything-eagle --json library summary
 cli-anything-eagle --json smart-folder audit
 ```
 
-Find and prepare folders by name or path:
+이름이나 경로로 폴더 찾기 및 준비:
 
 ```bash
 cli-anything-eagle folder find Inspiration
@@ -109,14 +104,14 @@ cli-anything-eagle --dry-run folder ensure-path "Design/UI/References"
 cli-anything-eagle folder ensure-path "Design/UI/References"
 ```
 
-Target items by folder path, not just folder ID:
+폴더 ID가 아니라 폴더 경로로 아이템 다루기:
 
 ```bash
 cli-anything-eagle item list --folder-path "Design/UI/References" --limit 20
 cli-anything-eagle item add-path ./shot.png --folder-path "Design/UI/References"
 ```
 
-Inspect smart-folder rules and variables already used inside Eagle:
+Eagle 안에서 이미 쓰고 있는 스마트 폴더 규칙과 변수를 점검:
 
 ```bash
 cli-anything-eagle smart-folder list
@@ -124,14 +119,14 @@ cli-anything-eagle smart-folder rules --name "Camera JPG"
 cli-anything-eagle --json smart-folder audit
 ```
 
-Run supported smart-folder rules as a real item query:
+지원되는 스마트 폴더 규칙을 실제 item query로 실행:
 
 ```bash
 cli-anything-eagle --json smart-folder run --name "Camera JPG"
 cli-anything-eagle smart-folder run --name "Camera JPG" --limit 100 --save-preset camera-jpg
 ```
 
-Preview batch edits safely before applying them:
+적용 전에 일괄 수정 미리보기:
 
 ```bash
 cli-anything-eagle --dry-run item bulk-update \
@@ -145,7 +140,7 @@ cli-anything-eagle item bulk-update \
   --add-tag reviewed
 ```
 
-Save reusable bulk-update presets and replay them later:
+bulk-update 프리셋 저장 및 재실행:
 
 ```bash
 cli-anything-eagle preset save-bulk-update review-ui \
@@ -156,14 +151,14 @@ cli-anything-eagle --dry-run preset run-bulk-update review-ui
 cli-anything-eagle preset run-bulk-update review-ui
 ```
 
-Share presets with other Eagle users:
+다른 Eagle 사용자와 프리셋 공유:
 
 ```bash
 cli-anything-eagle preset export ./bundles/team-presets.json review-ui ui-ref
 cli-anything-eagle preset import ./bundles/team-presets.json --prefix team-
 ```
 
-Save and reuse frequent searches:
+자주 쓰는 검색 저장 및 재사용:
 
 ```bash
 cli-anything-eagle preset save-item-list ui-ref \
@@ -175,7 +170,7 @@ cli-anything-eagle preset list
 cli-anything-eagle preset run-item-list ui-ref
 ```
 
-Add a whole local directory with filtering and a saved manifest:
+로컬 디렉터리 전체를 필터와 manifest와 함께 추가:
 
 ```bash
 cli-anything-eagle --dry-run item add-dir ./assets \
@@ -187,7 +182,7 @@ cli-anything-eagle --dry-run item add-dir ./assets \
 cli-anything-eagle item add-dir ./assets --recursive --glob "*.png"
 ```
 
-Fetch all matching items and export them:
+조건에 맞는 아이템을 모두 가져와서 export:
 
 ```bash
 cli-anything-eagle item list --all --limit 100 --keyword ui
@@ -195,14 +190,14 @@ cli-anything-eagle item export ./exports/ui-items.jsonl --all --limit 100 --keyw
 cli-anything-eagle item export ./exports/ui-items.csv --format csv --folder-path "Design/UI/References"
 ```
 
-Inspect filtered items before mutating them:
+수정 전에 필터된 아이템 상태 점검:
 
 ```bash
 cli-anything-eagle item stats --all --limit 50 --keyword ui
 cli-anything-eagle item stats --folder-path "Design/UI/References" --top 20
 ```
 
-Add safety rails to bulk updates:
+bulk update 안전장치 사용:
 
 ```bash
 cli-anything-eagle --dry-run item bulk-update \
@@ -218,7 +213,7 @@ cli-anything-eagle --dry-run item bulk-update \
   --skip-unchanged
 ```
 
-Reuse the last item-producing command or load item IDs from a file:
+직전 item-producing 명령 재사용 또는 파일에서 item ID 로드:
 
 ```bash
 cli-anything-eagle --json item list --limit 20 --keyword CleanShot
@@ -228,7 +223,7 @@ cli-anything-eagle item export ./exports/cleanshot.json --limit 20 --keyword Cle
 cli-anything-eagle --dry-run item bulk-update --item-file ./exports/cleanshot.json --add-tag reviewed
 ```
 
-Create rollback snapshots before bigger changes:
+큰 변경 전에 롤백용 snapshot 생성:
 
 ```bash
 cli-anything-eagle snapshot create ./snapshots/ui.json --folder-path "Design/UI/References"
@@ -237,7 +232,7 @@ cli-anything-eagle snapshot diff ./snapshots/ui.json --include-names --include-f
 cli-anything-eagle --dry-run snapshot restore ./snapshots/ui.json
 ```
 
-Rename or move many items with the companion bridge plugin:
+companion bridge plugin을 이용해 많은 아이템 이름/이동 작업 처리:
 
 ```bash
 cli-anything-eagle bridge install-plugin
@@ -253,7 +248,7 @@ cli-anything-eagle --dry-run item rename-bulk --folder-name References --prefix 
 cli-anything-eagle --dry-run item move-bulk --tag reviewed --target-folder-path "Archive/Reviewed"
 ```
 
-Operate directly on the current Eagle UI selection:
+현재 Eagle UI selection에 직접 작업:
 
 ```bash
 cli-anything-eagle --json bridge selected-item-ids
@@ -263,7 +258,7 @@ cli-anything-eagle --dry-run item move-bulk --current-selection --target-folder-
 cli-anything-eagle --dry-run organize apply --current-selection --add-tag reviewed --name-prefix ui-
 ```
 
-Selection-aware filters now work across audits, tag cleanup, and reports too:
+selection 기반 필터는 audit, tag 정리, report에도 사용 가능:
 
 ```bash
 cli-anything-eagle --json audit cleanup --current-selection --sample-limit 10
@@ -272,11 +267,11 @@ cli-anything-eagle --dry-run tag normalize --selection live-selection --trim --c
 cli-anything-eagle report tags ./reports/live-selection-tags.json --selection live-selection --format json
 ```
 
-On older Eagle plugin runtimes that do not expose `eagle.item.select(itemIds)`,
-`bridge select-items` now falls back to `open()` for single-item requests and
-reports whether Eagle actually changed the current selection.
+구형 Eagle plugin 런타임에서 `eagle.item.select(itemIds)`를 제공하지 않으면,
+`bridge select-items`는 단일 아이템 요청에 한해 `open()`으로 폴백하고,
+실제로 selection이 바뀌었는지까지 같이 보고합니다.
 
-Audit duplicate candidates and cleanup hotspots:
+중복 후보와 정리 핫스팟 audit:
 
 ```bash
 cli-anything-eagle --json audit duplicates --all --mode name --mode url --top 20
@@ -285,7 +280,7 @@ cli-anything-eagle --json audit dedupe-plan ./plans/duplicate-trash.json --keywo
 cli-anything-eagle --json plan stats ./plans/duplicate-trash.json
 ```
 
-Run a higher-level organize workflow in one command:
+한 번에 실행하는 고수준 organize workflow:
 
 ```bash
 cli-anything-eagle --dry-run organize apply \
@@ -297,7 +292,7 @@ cli-anything-eagle --dry-run organize apply \
   --save-snapshot ./snapshots/ui-reviewed.json
 ```
 
-Export mutation plans and apply them later:
+mutation plan 저장 후 나중에 적용:
 
 ```bash
 cli-anything-eagle --dry-run item bulk-update \
@@ -310,7 +305,7 @@ cli-anything-eagle plan stats ./plans/reviewed.json
 cli-anything-eagle plan apply ./plans/reviewed.json
 ```
 
-Bridge-backed plans work too:
+bridge 기반 plan도 동일하게 사용 가능:
 
 ```bash
 cli-anything-eagle --dry-run item rename-bulk \
@@ -322,7 +317,7 @@ cli-anything-eagle plan stats ./plans/rename.json
 cli-anything-eagle plan apply ./plans/rename.json
 ```
 
-Explain a saved plan or scaffold a fresh workflow before editing it:
+저장된 plan 설명 확인 또는 workflow 템플릿 생성:
 
 ```bash
 cli-anything-eagle workflow template --list
@@ -331,7 +326,7 @@ cli-anything-eagle --json workflow validate ./workflow.yml
 cli-anything-eagle --json plan explain ./plans/rename.json --output ./plans/rename.md --format md
 ```
 
-Audit and normalize tags before large cleanup passes:
+대규모 정리 전 태그 audit 및 정규화:
 
 ```bash
 cli-anything-eagle --json tag stats --all --top 25
@@ -347,7 +342,7 @@ cli-anything-eagle --dry-run tag alias-map-apply ./tag-aliases.yaml \
   --save-plan ./plans/tag-aliases.json
 ```
 
-Save and compare reusable item selections:
+재사용 가능한 item selection 저장 및 비교:
 
 ```bash
 cli-anything-eagle select save review-set --keyword review --all
@@ -356,7 +351,7 @@ cli-anything-eagle select diff review-set archived-set
 cli-anything-eagle select save-current live-selection
 ```
 
-Generate reusable reports and workflow plans:
+재사용 가능한 리포트와 workflow plan 생성:
 
 ```bash
 cli-anything-eagle report library ./reports/library.md --format md
@@ -372,7 +367,7 @@ cli-anything-eagle plan merge ./plans/all.json ./plans/chunks/*.json
 cli-anything-eagle report index ./reports/index.json ./reports ./plans ./snapshots
 ```
 
-Use manifests, incremental watching, shell completion, and built-in schemas:
+manifest, 증분 watch, 셸 completion, 내장 schema 활용:
 
 ```bash
 cli-anything-eagle ingest manifest ./manifests/assets.json --folder-path "Design/UI/References"
@@ -381,7 +376,7 @@ cli-anything-eagle completion script --shell zsh --output ./completions/cli-anyt
 cli-anything-eagle schema show workflow --output ./schemas/workflow.json
 ```
 
-Persist shared CLI defaults once and reuse them everywhere:
+공통 CLI 기본값을 한 번 저장하고 재사용:
 
 ```bash
 cli-anything-eagle config set report_format md
@@ -391,7 +386,7 @@ cli-anything-eagle config show
 cli-anything-eagle config unset completion_shell
 ```
 
-## Covered Commands
+## 지원 명령
 
 - `doctor`
 - `config path`, `show`, `set`, `unset`
@@ -406,14 +401,14 @@ cli-anything-eagle config unset completion_shell
 - `item add-path`, `add-paths`, `add-dir`, `add-url`, `add-urls`, `add-bookmark`
 - `item trash`, `refresh-palette`, `refresh-thumbnail`
 - `select list`, `save`, `show`, `delete`, `sample`, `diff`
-- `report library`, `tags`, `folders`, `trend`
+- `report library`, `index`, `tags`, `folders`, `trend`
 - `report dashboard`
 - `preset list`, `show`, `delete`, `export`, `import`, `save-item-list`, `run-item-list`, `save-bulk-update`, `run-bulk-update`
 - `snapshot create`, `show`, `diff`, `restore`
 - `audit duplicates`, `cleanup`, `cleanup-plan`, `dedupe-plan`
 - `organize apply`
 - `bridge status`, `doctor`, `context`, `selected-item-ids`, `open-folder`, `select-items`, `cleanup`, `export-plugin`, `install-plugin`, `ping`
-- `workflow validate`, `run`
+- `workflow template`, `validate`, `run`
 - `ingest manifest`
 - `watch import-dir`
 - `completion script`
@@ -421,55 +416,40 @@ cli-anything-eagle config unset completion_shell
 - `plan show`, `stats`, `save-last`, `apply`, `merge`, `split`, `filter`, `explain`, `validate`, `rollback-from-results`
 - `raw request`
 
-## Notes
+## 참고 사항
 
-- This harness targets the Eagle API variant verified locally:
+- 이 harness는 로컬에서 실제 응답이 확인된 Eagle API 변형을 기준으로 작성되었습니다:
   `GET /api/application/info`, `GET /api/library/info`, `GET /api/folder/list`,
-  and `GET /api/item/list`.
-- Newer Eagle Web API v2 docs also exist, but this project is optimized for the
-  API that actually responded on the tested Eagle build.
-- The CLI stores session state and presets in `~/.config/cli-anything-eagle`.
-  Existing `~/.config/eagle-agent-harness` state is read as a legacy fallback.
-- Session-state writes are now atomic, and a corrupted session file is moved
-  aside as `session.corrupt-<timestamp>.json` on the next load instead of
-  crashing the CLI.
-- Presets, plans, reports, manifests, bridge requests, and watch-state files
-  also use atomic writes so long-running or concurrent CLI usage is less likely
-  to leave partial JSON behind.
-- `--last` reuses item IDs from the immediately previous item-producing command
-  recorded in session state. It is best used in sequential workflows rather
-  than parallel command runs.
-- `smart-folder run` is intentionally conservative. If Eagle rules include
-  unsupported logic such as non-`AND` groups, it will stop unless you
-  explicitly pass `--allow-partial`.
-- `item bulk-update` can now enforce safety boundaries with `--max-items`,
-  `--require-match`, `--skip-unchanged`, and `--save-matches`.
-- `item bulk-update`, `rename-bulk`, `move-bulk`, `organize apply`, and
-  `snapshot restore` can all save reusable plans. `plan apply` now supports
-  both direct HTTP operations and bridge-backed rename or move operations.
-- `snapshot` files are plain JSON documents, so you can archive them with your
-  own backups or review them before any restore.
-- `audit dedupe-plan` only writes a reusable trash plan; it never deletes or
-  trashes anything by itself.
-- `item rename-bulk`, `item move-bulk`, and `organize apply` rely on the
-  companion bridge plugin when names or folder assignments must change through
-  Eagle's Plugin API instead of the local HTTP API.
-- `bridge install-plugin` copies the bundled service plugin into Eagle's plugin
-  directory. When no explicit plugin directory is passed, it now refreshes all
-  detected Eagle plugin roots. If Eagle is already open, restart it once so the
-  background bridge can start.
-- The companion plugin template is bundled inside the Python package under
-  `cli_anything/eagle/assets/companion-plugin`, so wheel installs can still
-  export and install the plugin without a checked-out repository tree.
-- `bridge status` and `bridge doctor` now summarize heartbeat freshness, queue
-  backlog, writable bridge directories, and whether the installed plugin build
-  matches the current CLI version.
-- `bridge selected-item-ids` is the narrowest bridge probe for selection-based
-  workflows and is also what `--current-selection` uses internally.
-- `item selected` and `folder selected` read the current Eagle UI selection
-  through the companion plugin. `item open`, `tag rename-live`, and
-  `tag merge-live` also require the plugin bridge to be active.
-- `bridge cleanup` only removes old bridge request/response artifacts. Use
-  `--dry-run` first if you want to preview which files would be pruned.
-- Mutating commands support `--dry-run`, which is useful when sharing the CLI
-  with other Eagle users who want to preview changes first.
+  `GET /api/item/list`
+- 최신 Eagle Web API v2 문서도 존재하지만, 이 프로젝트는 테스트한 Eagle 빌드에서 실제로 응답한 API에 맞춰 최적화되어 있습니다.
+- CLI는 세션 상태와 프리셋을 `~/.config/cli-anything-eagle`에 저장합니다.
+  기존 `~/.config/eagle-agent-harness` 상태는 레거시 fallback으로 읽습니다.
+- 세션 상태 쓰기는 원자적으로 처리되며, 손상된 세션 파일은 다음 로드 시 CLI를 죽이지 않고
+  `session.corrupt-<timestamp>.json`으로 옆으로 치워둡니다.
+- 프리셋, plan, report, manifest, bridge 요청, watch 상태 파일도 모두 원자적 쓰기를 사용하므로
+  장시간 실행이나 동시 실행 중 부분 JSON이 남을 가능성이 줄었습니다.
+- `--last`는 세션 상태에 기록된 바로 직전 item-producing 명령의 item ID를 재사용합니다.
+  병렬 실행보다 순차 워크플로우에서 사용하는 것이 적합합니다.
+- `smart-folder run`은 의도적으로 보수적으로 동작합니다.
+  Eagle 규칙에 non-`AND` 그룹 같은 미지원 로직이 있으면, 명시적으로 `--allow-partial`을 주지 않는 한 중단됩니다.
+- `item bulk-update`는 `--max-items`, `--require-match`, `--skip-unchanged`, `--save-matches`로 안전 경계를 둘 수 있습니다.
+- `item bulk-update`, `rename-bulk`, `move-bulk`, `organize apply`, `snapshot restore`는 모두 재사용 가능한 plan 저장을 지원합니다.
+  `plan apply`는 직접 HTTP 작업뿐 아니라 bridge 기반 rename/move 작업도 지원합니다.
+- `snapshot` 파일은 일반 JSON 문서이므로, 별도 백업에 보관하거나 restore 전에 사람이 직접 검토할 수 있습니다.
+- `audit dedupe-plan`은 재사용 가능한 휴지통 plan만 기록하며, 자체적으로 삭제나 휴지통 이동을 실행하지 않습니다.
+- `item rename-bulk`, `item move-bulk`, `organize apply`는 이름이나 폴더 배치를 로컬 HTTP API 대신
+  Eagle Plugin API로 바꿔야 할 때 companion bridge plugin에 의존합니다.
+- `bridge install-plugin`은 번들된 service plugin을 Eagle plugin 디렉터리로 복사합니다.
+  plugin 디렉터리를 명시하지 않으면 감지된 모든 Eagle plugin 루트를 갱신합니다.
+  Eagle이 이미 열려 있다면 백그라운드 bridge가 시작되도록 한 번 재시작하세요.
+- companion plugin 템플릿은 Python 패키지 내부 `cli_anything/eagle/assets/companion-plugin`에도 들어 있으므로,
+  wheel 설치에서도 저장소 checkout 없이 plugin export/install이 가능합니다.
+- `bridge status`, `bridge doctor`는 heartbeat freshness, queue backlog, 쓰기 가능한 bridge 디렉터리,
+  설치된 plugin 빌드가 현재 CLI 버전과 맞는지까지 요약합니다.
+- `bridge selected-item-ids`는 selection 기반 워크플로우에서 가장 좁은 bridge probe이며,
+  `--current-selection`도 내부적으로 이것을 사용합니다.
+- `item selected`, `folder selected`는 companion plugin을 통해 현재 Eagle UI selection을 읽습니다.
+  `item open`, `tag rename-live`, `tag merge-live`도 bridge plugin이 활성화되어 있어야 합니다.
+- `bridge cleanup`은 오래된 bridge request/response 산출물만 지웁니다.
+  어떤 파일이 지워질지 먼저 보고 싶다면 `--dry-run`을 먼저 사용하세요.
+- 변경 명령은 대부분 `--dry-run`을 지원하므로, 다른 Eagle 사용자와 공유할 때도 먼저 미리볼 수 있습니다.

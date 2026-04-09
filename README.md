@@ -84,6 +84,7 @@ cli-anything-eagle report dashboard ./reports/dashboard.md --format md --all
 cli-anything-eagle --json workflow validate ./workflow.yml
 cli-anything-eagle --json bridge status
 cli-anything-eagle --json bridge selected-item-ids
+cli-anything-eagle --json report current-context ./reports/current-context.json
 cli-anything-eagle --json bridge doctor --skip-ping
 cli-anything-eagle --json item selected
 cli-anything-eagle --json folder selected
@@ -278,6 +279,14 @@ cli-anything-eagle --dry-run tag normalize --selection live-selection --trim --c
 cli-anything-eagle report tags ./reports/live-selection-tags.json --selection live-selection --format json
 ```
 
+Capture the current Eagle folder as a reusable target or selection:
+
+```bash
+cli-anything-eagle --json report current-context ./reports/current-context.json
+cli-anything-eagle select save-current-folder live-folder
+cli-anything-eagle --dry-run item move-to-current-folder --selection review-set
+```
+
 On older Eagle plugin runtimes that do not expose `eagle.item.select(itemIds)`,
 `bridge select-items` now falls back to `open()` for single-item requests and
 reports whether Eagle actually changed the current selection.
@@ -376,6 +385,18 @@ cli-anything-eagle plan validate ./plans/workflow.json
 cli-anything-eagle plan split ./plans/workflow.json ./plans/chunks --max-operations 25
 cli-anything-eagle plan merge ./plans/all.json ./plans/chunks/*.json
 cli-anything-eagle report index ./reports/index.json ./reports ./plans ./snapshots
+```
+
+Workflow selections can now point at the live Eagle UI too:
+
+```yaml
+kind: eagle-cli-workflow
+selection:
+  current_folder: true
+  fetch_all: true
+steps:
+  - action: snapshot
+    output: ./snapshots/current-folder.json
 ```
 
 Use manifests, incremental watching, shell completion, and built-in schemas:

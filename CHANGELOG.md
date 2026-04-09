@@ -2,6 +2,12 @@
 
 This changelog summarizes the releases already reflected in the repository history and documentation.
 
+## 0.16.0
+- Added `select save-current-folder`, `item move-to-current-folder`, and `report current-context` so plugin-backed Eagle UI state can be turned into saved selections, reports, and move targets without copying folder IDs by hand.
+- Promoted the companion bridge `get_context` response into shared CLI helpers for current-folder resolution, so `folder selected` and other current-context flows resolve stable folder paths when the local HTTP API knows them.
+- Extended workflow file selection support with saved selections, `current_selection`, and `current_folder` so declarative runs can target the live Eagle UI state through the companion plugin.
+- Synchronized the CLI and bundled companion-plugin versions after the current-context workflow expansion.
+
 ## 0.15.0
 - Added plugin-backed `app show` so the CLI can bring Eagle's main window to the front through the companion bridge when the runtime supports `eagle.app.show()`.
 - Added plugin-backed `tag recent-live` and `tag starred-live` to surface Eagle's recent and starred tags directly from the Plugin API.

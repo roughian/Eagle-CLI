@@ -1719,16 +1719,8 @@ def folder_find(app: AppContext, query: str, exact: bool) -> None:
 @click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
 @pass_app
 def folder_selected(app: AppContext, bridge_timeout: float) -> None:
-    result = _bridge_request("get_context", {"item_limit": 1}, timeout_seconds=bridge_timeout, queue_only=False)
-    payload = _bridge_response_data(result)
-    records_by_id = {record.id: record for record in _folder_records(app)}
-    rows = []
-    for folder in payload.get("selected_folders") or []:
-        row = dict(folder)
-        record = records_by_id.get(str(folder.get("id") or ""))
-        if record is not None:
-            row.update(_folder_row(record) or {})
-        rows.append(row)
+    result, payload = _current_context_payload(app, item_limit=1, bridge_timeout=bridge_timeout)
+    rows = list(payload.get("selected_folders") or [])
     _emit_and_remember(
         app,
         "folder selected",
@@ -2845,6 +2837,181 @@ def item_move_bulk(
                 "operation_count": len(operations),
                 "target_folder": _folder_row(folder) if folder is not None else None,
                 "ensure_result": ensure_result,
+                "operations": operations,
+                "skipped": skipped,
+                "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+                "saved_matches": str(save_matches) if save_matches is not None else None,
+                "saved_plan": str(save_plan) if save_plan is not None else None,
+                "bridge": bridge_result,
+            },
+        },
+    )
+
+
+@item.command("move-to-current-folder")
+@item_selector_source_options
+@item_filter_options
+@click.option("--max-items", type=click.IntRange(1, None), default=None, help="Refuse to continue if more than this many items match.")
+@click.option("--require-match", type=click.IntRange(1, None), default=None, help="Require at least this many matched items.")
+@click.option("--skip-unchanged", is_flag=True)
+@click.option("--save-snapshot", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Save a rollback snapshot before moving.")
+@click.option("--save-matches", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write matched items to a file before applying updates.")
+@click.option("--save-plan", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write the generated move plan to a JSON file.")
+@click.option(
+    "--current-folder-timeout",
+    type=float,
+    default=DEFAULT_WAIT_SECONDS,
+    show_default=True,
+    help="Seconds to wait for the companion bridge when resolving the current Eagle folder.",
+)
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
+@pass_app
+def item_move_to_current_folder(
+    app: AppContext,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+    max_items: int | None,
+    require_match: int | None,
+    skip_unchanged: bool,
+    save_snapshot: Path | None,
+    save_matches: Path | None,
+    save_plan: Path | None,
+    current_folder_timeout: float,
+    bridge_timeout: float,
+    queue_only: bool,
+) -> None:
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
+    items = _collect_target_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    matched_count = _apply_item_guardrails(
+        items,
+        max_items=max_items,
+        require_match=require_match,
+        save_matches=save_matches,
+    )
+    if save_snapshot is not None:
+        _write_snapshot(save_snapshot, _snapshot_document("item move-to-current-folder", items))
+    folder = _current_folder_record(app, bridge_timeout=current_folder_timeout)
+    operations, skipped = _build_move_operations(
+        items,
+        target_folder_id=folder.id,
+        target_folder_path=folder.path,
+        skip_unchanged=skip_unchanged,
+    )
+    if save_plan is not None:
+        _save_plan_if_requested(
+            save_plan,
+            "item move-to-current-folder",
+            [_make_bridge_operation("move_items", {"operations": operations}, description="Move items into the current Eagle folder")],
+            context={
+                "matched_count": matched_count,
+                "operation_count": len(operations),
+                "skipped_count": len(skipped),
+                "target_folder": _folder_row(folder),
+                "target_source": "current-folder",
+                "selector": _item_selector_context(
+                    item_ids=resolved_item_ids,
+                    selection_name=selection_name,
+                    use_last=use_last,
+                    use_current_selection=use_current_selection,
+                    fetch_all=fetch_all,
+                    limit=limit,
+                    offset=offset,
+                    order_by=order_by,
+                    keyword=keyword,
+                    ext=ext,
+                    tags=tags,
+                    folders=folders,
+                    folder_names=folder_names,
+                    folder_paths=folder_paths,
+                ),
+            },
+        )
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "item move-to-current-folder",
+            {
+                "status": "dry-run",
+                "data": {
+                    "matched_count": matched_count,
+                    "operation_count": len(operations),
+                    "target_folder": _folder_row(folder),
+                    "target_source": "current-folder",
+                    "operations": operations,
+                    "skipped": skipped,
+                    "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+                    "saved_matches": str(save_matches) if save_matches is not None else None,
+                    "saved_plan": str(save_plan) if save_plan is not None else None,
+                },
+            },
+        )
+        return
+    bridge_result = _bridge_request(
+        "move_items",
+        {"operations": operations},
+        timeout_seconds=bridge_timeout,
+        queue_only=queue_only,
+    )
+    _emit_and_remember(
+        app,
+        "item move-to-current-folder",
+        {
+            "status": "success",
+            "data": {
+                "matched_count": matched_count,
+                "operation_count": len(operations),
+                "target_folder": _folder_row(folder),
+                "target_source": "current-folder",
                 "operations": operations,
                 "skipped": skipped,
                 "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
@@ -5295,6 +5462,70 @@ def select_save_current(app: AppContext, name: str, item_limit: int, bridge_time
     _emit_and_remember(app, "select save-current", _save_current_selection_result(app, name=name, item_limit=item_limit, bridge_timeout=bridge_timeout))
 
 
+@select_group.command("save-current-folder")
+@click.argument("name")
+@click.option("--all/--first-page", "fetch_all", default=True, show_default=True, help="Collect every item from the current Eagle folder by paging.")
+@click.option("--limit", type=click.IntRange(1, None), default=200, show_default=True, help="Page size for folder item collection.")
+@click.option("--order-by", default=None, help="Examples: CREATEDATE, -FILESIZE, NAME, -RESOLUTION.")
+@click.option("--keyword", default=None, help="Optional keyword filter within the current Eagle folder.")
+@click.option("--ext", default=None, help="Optional extension filter within the current Eagle folder.")
+@click.option("--tag", "tags", multiple=True, help="Require these existing tags within the current Eagle folder.")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@pass_app
+def select_save_current_folder(
+    app: AppContext,
+    name: str,
+    fetch_all: bool,
+    limit: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    bridge_timeout: float,
+) -> None:
+    folder = _current_folder_record(app, bridge_timeout=bridge_timeout)
+    query = _query_items(
+        app,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=0,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=(folder.id,),
+        folder_names=(),
+        folder_paths=(),
+    )
+    saved_ids = [str(item.get("id")) for item in query["items"] if str(item.get("id"))]
+    path = save_selection_document(
+        name,
+        saved_ids,
+        state_dir=DEFAULT_STATE_DIR,
+        context={
+            "source": "current-folder",
+            "folder": _folder_row(folder),
+            "query": query["query"],
+            "pages": query["pages"],
+        },
+    )
+    _emit_and_remember(
+        app,
+        "select save-current-folder",
+        {
+            "status": "success",
+            "data": {
+                "name": name,
+                "saved_to": str(path),
+                "item_count": len(saved_ids),
+                "sample_ids": saved_ids[:10],
+                "folder": _folder_row(folder),
+                "pages": query["pages"],
+            },
+        },
+    )
+
+
 @select_group.command("apply")
 @click.argument("name")
 @click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
@@ -5469,6 +5700,47 @@ def report_library(app: AppContext, output_file: Path, report_format: str) -> No
                 "saved_to": str(output_file),
                 "format": resolved_format,
                 "summary": {key: value for key, value in document.items() if key not in {"title", "rows"}},
+            },
+        },
+    )
+
+
+@report.command("current-context")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html"]), default="auto", show_default=True)
+@click.option("--item-limit", type=click.IntRange(1, None), default=20, show_default=True, help="Maximum selected item rows to capture from Eagle.")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@pass_app
+def report_current_context(
+    app: AppContext,
+    output_file: Path,
+    report_format: str,
+    item_limit: int,
+    bridge_timeout: float,
+) -> None:
+    result, payload = _current_context_payload(app, item_limit=item_limit, bridge_timeout=bridge_timeout)
+    document = {
+        "title": "CLI-Anything Eagle Current Context Report",
+        "generated_at": _utc_now(),
+        "selected_item_count": payload.get("selected_item_count", len(payload.get("selected_items") or [])),
+        "selected_folder_count": payload.get("selected_folder_count", len(payload.get("selected_folders") or [])),
+        "truncated_items": bool(payload.get("truncated_items")),
+        "selected_items": list(payload.get("selected_items") or []),
+        "selected_folders": list(payload.get("selected_folders") or []),
+        "status": payload.get("status") or {},
+        "bridge": {"request_id": result["data"]["request_id"]},
+    }
+    resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
+    _emit_and_remember(
+        app,
+        "report current-context",
+        {
+            "status": "success",
+            "data": {
+                "saved_to": str(output_file),
+                "format": resolved_format,
+                "selected_item_count": document["selected_item_count"],
+                "selected_folder_count": document["selected_folder_count"],
             },
         },
     )
@@ -7666,6 +7938,75 @@ def _organize_plan_operations(
     return operations
 
 
+def _current_context_payload(
+    app: AppContext,
+    *,
+    item_limit: int,
+    bridge_timeout: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    result = _bridge_request("get_context", {"item_limit": item_limit}, timeout_seconds=bridge_timeout, queue_only=False)
+    payload = _bridge_response_data(result)
+    records_by_id = {record.id: record for record in _folder_records(app)}
+    selected_folders: list[dict[str, Any]] = []
+    for folder in payload.get("selected_folders") or []:
+        row = dict(folder)
+        record = records_by_id.get(str(folder.get("id") or ""))
+        if record is not None:
+            row.update(_folder_row(record) or {})
+        selected_folders.append(row)
+    return result, {**payload, "selected_folders": selected_folders}
+
+
+def _bridge_folder_record(folder: dict[str, Any]) -> FolderRecord:
+    path = normalize_folder_path(str(folder.get("path") or folder.get("name") or ""))
+    if path:
+        parent_path = "/".join(path.split("/")[:-1]) or None
+    else:
+        parent_path = None
+    depth_value = folder.get("depth")
+    try:
+        depth = int(depth_value) if depth_value is not None else (path.count("/") if path else 0)
+    except (TypeError, ValueError):
+        depth = path.count("/") if path else 0
+    return FolderRecord(
+        id=str(folder.get("id") or ""),
+        name=str(folder.get("name") or (path.split("/")[-1] if path else "")),
+        path=path,
+        depth=depth,
+        parent_id=str(folder.get("parent_id") or folder.get("parent") or "") or None,
+        parent_path=parent_path,
+        raw=dict(folder),
+    )
+
+
+def _current_folder_records(
+    app: AppContext,
+    *,
+    bridge_timeout: float,
+    required: bool = True,
+) -> list[FolderRecord]:
+    _, payload = _current_context_payload(app, item_limit=1, bridge_timeout=bridge_timeout)
+    selected_folders = list(payload.get("selected_folders") or [])
+    if not selected_folders:
+        if required:
+            raise click.ClickException("The companion plugin did not report any currently selected Eagle folders.")
+        return []
+    records_by_id = {record.id: record for record in _folder_records(app)}
+    resolved: list[FolderRecord] = []
+    for folder in selected_folders:
+        folder_id = str(folder.get("id") or "")
+        resolved.append(records_by_id.get(folder_id) or _bridge_folder_record(folder))
+    return resolved
+
+
+def _current_folder_record(app: AppContext, *, bridge_timeout: float) -> FolderRecord:
+    records = _current_folder_records(app, bridge_timeout=bridge_timeout, required=True)
+    if len(records) > 1:
+        paths = ", ".join(record.path or record.id for record in records)
+        raise click.ClickException(f"Expected exactly one current Eagle folder, but the companion plugin reported {len(records)}: {paths}")
+    return records[0]
+
+
 def _current_selection_item_ids(app: AppContext, *, bridge_timeout: float) -> tuple[str, ...]:
     result = _bridge_request("get_selected_item_ids", {}, timeout_seconds=bridge_timeout, queue_only=False)
     payload = _bridge_response_data(result)
@@ -9286,6 +9627,11 @@ def _workflow_selector(payload: dict[str, Any]) -> dict[str, Any]:
         "item_ids": item_ids,
         "item_file": Path(selector["item_file"]) if selector.get("item_file") else None,
         "use_last": bool(selector.get("last")),
+        "selection_name": selector.get("selection"),
+        "use_current_selection": bool(selector.get("current_selection")),
+        "current_selection_timeout": float(selector.get("current_selection_timeout", DEFAULT_WAIT_SECONDS)),
+        "use_current_folder": bool(selector.get("current_folder")),
+        "current_folder_timeout": float(selector.get("current_folder_timeout", DEFAULT_WAIT_SECONDS)),
         "fetch_all": bool(selector.get("fetch_all")),
         "limit": int(selector.get("limit", 20)),
         "offset": int(selector.get("offset", 0)),
@@ -9301,15 +9647,23 @@ def _workflow_selector(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _workflow_items(app: AppContext, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     selector = _workflow_selector(payload)
+    current_folder_ids = (
+        tuple(record.id for record in _current_folder_records(app, bridge_timeout=selector["current_folder_timeout"], required=True))
+        if selector["use_current_folder"]
+        else ()
+    )
+    folders = tuple(_unique_preserve_order([*selector["folders"], *current_folder_ids]))
     _validate_item_selector_request(
         item_ids=selector["item_ids"],
         item_file=selector["item_file"],
         use_last=selector["use_last"],
+        selection_name=selector["selection_name"],
+        use_current_selection=selector["use_current_selection"],
         fetch_all=selector["fetch_all"],
         keyword=selector["keyword"],
         ext=selector["ext"],
         tags=selector["tags"],
-        folders=selector["folders"],
+        folders=folders,
         folder_names=selector["folder_names"],
         folder_paths=selector["folder_paths"],
     )
@@ -9318,6 +9672,9 @@ def _workflow_items(app: AppContext, payload: dict[str, Any]) -> tuple[list[dict
         item_ids=selector["item_ids"],
         item_file=selector["item_file"],
         use_last=selector["use_last"],
+        selection_name=selector["selection_name"],
+        use_current_selection=selector["use_current_selection"],
+        current_selection_timeout=selector["current_selection_timeout"],
     )
     query = _query_or_collect_items(
         app,
@@ -9329,7 +9686,7 @@ def _workflow_items(app: AppContext, payload: dict[str, Any]) -> tuple[list[dict
         keyword=selector["keyword"],
         ext=selector["ext"],
         tags=selector["tags"],
-        folders=selector["folders"],
+        folders=folders,
         folder_names=selector["folder_names"],
         folder_paths=selector["folder_paths"],
     )
@@ -9498,7 +9855,29 @@ def _schema_document(kind: str) -> dict[str, Any]:
             "properties": {
                 "kind": {"const": "eagle-cli-workflow"},
                 "version": {"type": "integer"},
-                "selection": {"type": "object"},
+                "selection": {
+                    "type": "object",
+                    "properties": {
+                        "item_ids": {"type": "array"},
+                        "item_file": {"type": "string"},
+                        "selection": {"type": "string"},
+                        "last": {"type": "boolean"},
+                        "current_selection": {"type": "boolean"},
+                        "current_selection_timeout": {"type": "number"},
+                        "current_folder": {"type": "boolean"},
+                        "current_folder_timeout": {"type": "number"},
+                        "fetch_all": {"type": "boolean"},
+                        "limit": {"type": "integer"},
+                        "offset": {"type": "integer"},
+                        "order_by": {"type": "string"},
+                        "keyword": {"type": "string"},
+                        "ext": {"type": "string"},
+                        "tags": {"type": "array"},
+                        "folders": {"type": "array"},
+                        "folder_names": {"type": "array"},
+                        "folder_paths": {"type": "array"},
+                    },
+                },
                 "steps": {"type": "array"},
             },
         },

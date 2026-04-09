@@ -97,6 +97,7 @@ python3 -m cli_anything.eagle.eagle_cli --json --dry-run item bulk-update --item
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run item rename-bulk --item-id EXAMPLE --prefix archived- --save-plan ./rename.json
 python3 -m cli_anything.eagle.eagle_cli item rename-bulk --help
 python3 -m cli_anything.eagle.eagle_cli item move-bulk --help
+python3 -m cli_anything.eagle.eagle_cli item move-to-current-folder --help
 python3 -m cli_anything.eagle.eagle_cli organize apply --help
 python3 -m cli_anything.eagle.eagle_cli preset --help
 python3 -m cli_anything.eagle.eagle_cli smart-folder --help
@@ -104,17 +105,24 @@ python3 -m cli_anything.eagle.eagle_cli plan --help
 python3 -m cli_anything.eagle.eagle_cli workflow --help
 python3 -m cli_anything.eagle.eagle_cli watch --help
 python3 -m cli_anything.eagle.eagle_cli select --help
+python3 -m cli_anything.eagle.eagle_cli select save-current-folder --help
 python3 -m cli_anything.eagle.eagle_cli tag --help
 python3 -m cli_anything.eagle.eagle_cli config --help
 python3 -m cli_anything.eagle.eagle_cli report dashboard --help
+python3 -m cli_anything.eagle.eagle_cli report current-context --help
 ```
 
 ## Result
 
-- `0.15.0` checks passed for:
+- `0.16.0` checks passed for:
   - `python3 -m unittest discover -s tests -v`
   - `node --check companion-plugin/plugin.js`
   - `node --check cli_anything/eagle/assets/companion-plugin/plugin.js`
+  - `python3 -m py_compile cli_anything/eagle/eagle_cli.py tests/test_cli.py`
+  - `python3 -m cli_anything.eagle.eagle_cli item move-to-current-folder --help`
+  - `python3 -m cli_anything.eagle.eagle_cli select save-current-folder --help`
+  - `python3 -m cli_anything.eagle.eagle_cli report current-context --help`
+  - `python3 -m cli_anything.eagle.eagle_cli --json report current-context /tmp/cli-anything-eagle-current-context.json --item-limit 5`
   - `python3 -m cli_anything.eagle.eagle_cli --json workflow template --list`
   - `python3 -m cli_anything.eagle.eagle_cli --json workflow template review-batch <tmp>/workflow.yml`
   - `python3 -m cli_anything.eagle.eagle_cli --json plan explain <tmp>/plan.json --output <tmp>/plan.md --format md`

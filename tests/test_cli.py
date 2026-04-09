@@ -451,6 +451,43 @@ class EagleCliTests(unittest.TestCase):
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_item_move_to_current_folder_dry_run_uses_selected_folder(
+        self, mock_bridge_request, mock_folder_list, mock_item_info, mock_load, _mock_save
+    ):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-current-folder",
+                "response": {
+                    "status": "success",
+                    "data": {
+                        "selected_folder_count": 1,
+                        "selected_folders": [{"id": "child", "name": "Child"}],
+                    },
+                },
+            },
+        }
+        mock_folder_list.return_value = {
+            "status": "success",
+            "data": [{"id": "root", "name": "Root", "children": [{"id": "child", "name": "Child", "children": []}]}],
+        }
+        mock_item_info.return_value = {"status": "success", "data": {"id": "abc", "name": "Sample", "folders": []}}
+        result = self.runner.invoke(cli, ["--json", "--dry-run", "item", "move-to-current-folder", "--item-id", "abc"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["target_source"], "current-folder")
+        self.assertEqual(payload["data"]["target_folder"]["path"], "Root/Child")
+        self.assertEqual(payload["data"]["operations"][0]["folder_ids"], ["child"])
+        mock_bridge_request.assert_called_once_with("get_context", {"item_limit": 1}, timeout_seconds=15.0, queue_only=False)
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
     @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
     def test_audit_duplicates_groups_items(self, mock_item_list, mock_load, _mock_save):
         from cli_anything.eagle.core.state import SessionState
@@ -996,6 +1033,51 @@ class EagleCliTests(unittest.TestCase):
         payload = json.loads(result.output)
         self.assertEqual(payload["data"]["item_count"], 2)
         self.assertEqual(saved["item_ids"], ["a", "b"])
+
+    @patch("cli_anything.eagle.eagle_cli.DEFAULT_STATE_DIR", Path(".state"))
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_select_save_current_folder_persists_current_folder_items(
+        self, mock_bridge_request, mock_folder_list, mock_item_list, mock_load, _mock_save
+    ):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-current-folder",
+                "response": {
+                    "status": "success",
+                    "data": {
+                        "selected_folder_count": 1,
+                        "selected_folders": [{"id": "child", "name": "Child"}],
+                    },
+                },
+            },
+        }
+        mock_folder_list.return_value = {
+            "status": "success",
+            "data": [{"id": "root", "name": "Root", "children": [{"id": "child", "name": "Child", "children": []}]}],
+        }
+        mock_item_list.return_value = {
+            "status": "success",
+            "data": [{"id": "a", "name": "Alpha"}, {"id": "b", "name": "Beta"}],
+        }
+        with self.runner.isolated_filesystem():
+            result = self.runner.invoke(cli, ["--json", "select", "save-current-folder", "active"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            with open(".state/selections/active.json", "r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["item_count"], 2)
+        self.assertEqual(payload["data"]["folder"]["path"], "Root/Child")
+        self.assertEqual(saved["item_ids"], ["a", "b"])
+        self.assertEqual(saved["context"]["folder"]["path"], "Root/Child")
+        self.assertEqual(mock_item_list.call_args.kwargs["folders"], "child")
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
@@ -1874,6 +1956,88 @@ class EagleCliTests(unittest.TestCase):
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_workflow_run_dry_run_accepts_current_folder_selection(
+        self, mock_bridge_request, mock_item_list, mock_folder_list, mock_load, _mock_save
+    ):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-workflow-folder",
+                "response": {
+                    "status": "success",
+                    "data": {
+                        "selected_folder_count": 1,
+                        "selected_folders": [{"id": "child", "name": "Child"}],
+                    },
+                },
+            },
+        }
+        mock_folder_list.return_value = {
+            "status": "success",
+            "data": [{"id": "root", "name": "Root", "children": [{"id": "child", "name": "Child", "children": []}]}],
+        }
+        mock_item_list.return_value = {"status": "success", "data": [{"id": "abc", "name": "Sample", "tags": [], "folders": ["child"]}]}
+        with self.runner.isolated_filesystem():
+            with open("workflow.json", "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "kind": "eagle-cli-workflow",
+                        "selection": {"current_folder": True, "fetch_all": True},
+                        "steps": [{"action": "snapshot", "output": "snap.json"}],
+                    },
+                    handle,
+                )
+            result = self.runner.invoke(cli, ["--json", "--dry-run", "workflow", "run", "workflow.json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["item_count"], 1)
+        self.assertEqual(mock_item_list.call_args.kwargs["folders"], "child")
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_workflow_run_dry_run_accepts_current_selection(
+        self, mock_bridge_request, mock_item_info, mock_load, _mock_save
+    ):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-workflow-selection",
+                "response": {
+                    "status": "success",
+                    "data": {"item_ids": ["abc"]},
+                },
+            },
+        }
+        mock_item_info.return_value = {"status": "success", "data": {"id": "abc", "name": "Sample", "tags": [], "folders": []}}
+        with self.runner.isolated_filesystem():
+            with open("workflow.json", "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "kind": "eagle-cli-workflow",
+                        "selection": {"current_selection": True},
+                        "steps": [{"action": "snapshot", "output": "snap.json"}],
+                    },
+                    handle,
+                )
+            result = self.runner.invoke(cli, ["--json", "--dry-run", "workflow", "run", "workflow.json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["item_count"], 1)
+        mock_bridge_request.assert_called_once_with("get_selected_item_ids", {}, timeout_seconds=15.0, queue_only=False)
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
     def test_ingest_manifest_dry_run_uses_manifest_items(self, mock_load, _mock_save):
         from cli_anything.eagle.core.state import SessionState
 
@@ -2081,6 +2245,47 @@ class EagleCliTests(unittest.TestCase):
         payload = json.loads(result.output)
         self.assertEqual(payload["data"]["row_count"], 1)
         self.assertEqual(report["rows"][0]["tag"], "ui")
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_report_current_context_writes_current_plugin_context(
+        self, mock_bridge_request, mock_folder_list, mock_load, _mock_save
+    ):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-context-report",
+                "response": {
+                    "status": "success",
+                    "data": {
+                        "selected_item_count": 1,
+                        "selected_folder_count": 1,
+                        "truncated_items": False,
+                        "selected_items": [{"id": "abc", "name": "Alpha"}],
+                        "selected_folders": [{"id": "child", "name": "Child"}],
+                        "status": {"library": {"name": "Demo Library"}},
+                    },
+                },
+            },
+        }
+        mock_folder_list.return_value = {
+            "status": "success",
+            "data": [{"id": "root", "name": "Root", "children": [{"id": "child", "name": "Child", "children": []}]}],
+        }
+        with self.runner.isolated_filesystem():
+            result = self.runner.invoke(cli, ["--json", "report", "current-context", "context.json", "--item-limit", "5"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            with open("context.json", "r", encoding="utf-8") as handle:
+                report = json.load(handle)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["selected_item_count"], 1)
+        self.assertEqual(report["selected_folders"][0]["path"], "Root/Child")
+        self.assertEqual(report["status"]["library"]["name"], "Demo Library")
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")

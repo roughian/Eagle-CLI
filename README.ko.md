@@ -80,6 +80,7 @@ cli-anything-eagle report dashboard ./reports/dashboard.md --format md --all
 cli-anything-eagle --json workflow validate ./workflow.yml
 cli-anything-eagle --json bridge status
 cli-anything-eagle --json bridge selected-item-ids
+cli-anything-eagle --json report current-context ./reports/current-context.json
 cli-anything-eagle --json bridge doctor --skip-ping
 cli-anything-eagle --json item selected
 cli-anything-eagle --json folder selected
@@ -273,6 +274,14 @@ cli-anything-eagle --dry-run tag normalize --selection live-selection --trim --c
 cli-anything-eagle report tags ./reports/live-selection-tags.json --selection live-selection --format json
 ```
 
+현재 Eagle 폴더를 재사용 가능한 대상이나 selection으로 저장:
+
+```bash
+cli-anything-eagle --json report current-context ./reports/current-context.json
+cli-anything-eagle select save-current-folder live-folder
+cli-anything-eagle --dry-run item move-to-current-folder --selection review-set
+```
+
 구형 Eagle plugin 런타임에서 `eagle.item.select(itemIds)`를 제공하지 않으면,
 `bridge select-items`는 단일 아이템 요청에 한해 `open()`으로 폴백하고,
 실제로 selection이 바뀌었는지까지 같이 보고합니다.
@@ -371,6 +380,18 @@ cli-anything-eagle plan validate ./plans/workflow.json
 cli-anything-eagle plan split ./plans/workflow.json ./plans/chunks --max-operations 25
 cli-anything-eagle plan merge ./plans/all.json ./plans/chunks/*.json
 cli-anything-eagle report index ./reports/index.json ./reports ./plans ./snapshots
+```
+
+이제 workflow selection도 현재 Eagle UI를 직접 가리킬 수 있습니다:
+
+```yaml
+kind: eagle-cli-workflow
+selection:
+  current_folder: true
+  fetch_all: true
+steps:
+  - action: snapshot
+    output: ./snapshots/current-folder.json
 ```
 
 manifest, 증분 watch, 셸 completion, 내장 schema 활용:

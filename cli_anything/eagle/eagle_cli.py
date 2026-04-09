@@ -312,6 +312,47 @@ def app_info(app: AppContext) -> None:
     _emit_and_remember(app, "app info", app.client.app_info())
 
 
+@app.command("show")
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
+@pass_app
+def app_show(app: AppContext, bridge_timeout: float, queue_only: bool) -> None:
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "app show",
+            {
+                "status": "dry-run",
+                "data": {
+                    "action": "show_app",
+                },
+            },
+        )
+        return
+    bridge_result = _bridge_request(
+        "show_app",
+        {},
+        timeout_seconds=bridge_timeout,
+        queue_only=queue_only,
+    )
+    payload = _bridge_response_data(bridge_result)
+    _emit_and_remember(
+        app,
+        "app show",
+        {
+            "status": bridge_result.get("status", "success"),
+            "data": {
+                "bridge": bridge_result["data"],
+                "response": payload,
+                "shown": payload.get("shown"),
+                "app_version": payload.get("app_version"),
+                "app_build": payload.get("app_build"),
+                "locale": payload.get("locale"),
+            },
+        },
+    )
+
+
 @cli.group()
 def library() -> None:
     """Library commands."""
@@ -4606,6 +4647,92 @@ def tag_merge_live(app: AppContext, source: str, target: str, bridge_timeout: fl
             "data": {
                 "source": source,
                 "target": target,
+                "bridge": bridge_result["data"],
+                "response": payload,
+            },
+        },
+    )
+
+
+@tag.command("recent-live")
+@click.option("--top", type=click.IntRange(1, None), default=20, show_default=True)
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
+@pass_app
+def tag_recent_live(app: AppContext, top: int, bridge_timeout: float, queue_only: bool) -> None:
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "tag recent-live",
+            {
+                "status": "dry-run",
+                "data": {
+                    "action": "get_recent_tags",
+                    "top": top,
+                },
+            },
+        )
+        return
+    bridge_result = _bridge_request(
+        "get_recent_tags",
+        {},
+        timeout_seconds=bridge_timeout,
+        queue_only=queue_only,
+    )
+    payload = _bridge_response_data(bridge_result)
+    rows = list(payload.get("rows") or [])
+    _emit_and_remember(
+        app,
+        "tag recent-live",
+        {
+            "status": bridge_result.get("status", "success"),
+            "data": {
+                "count": payload.get("count", len(rows)),
+                "rows": rows[:top],
+                "top": top,
+                "bridge": bridge_result["data"],
+                "response": payload,
+            },
+        },
+    )
+
+
+@tag.command("starred-live")
+@click.option("--top", type=click.IntRange(1, None), default=20, show_default=True)
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue the bridge request without waiting for Eagle to process it.")
+@pass_app
+def tag_starred_live(app: AppContext, top: int, bridge_timeout: float, queue_only: bool) -> None:
+    if app.dry_run:
+        _emit_and_remember(
+            app,
+            "tag starred-live",
+            {
+                "status": "dry-run",
+                "data": {
+                    "action": "get_starred_tags",
+                    "top": top,
+                },
+            },
+        )
+        return
+    bridge_result = _bridge_request(
+        "get_starred_tags",
+        {},
+        timeout_seconds=bridge_timeout,
+        queue_only=queue_only,
+    )
+    payload = _bridge_response_data(bridge_result)
+    rows = list(payload.get("rows") or [])
+    _emit_and_remember(
+        app,
+        "tag starred-live",
+        {
+            "status": bridge_result.get("status", "success"),
+            "data": {
+                "count": payload.get("count", len(rows)),
+                "rows": rows[:top],
+                "top": top,
                 "bridge": bridge_result["data"],
                 "response": payload,
             },

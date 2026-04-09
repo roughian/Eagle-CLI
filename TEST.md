@@ -30,6 +30,7 @@ cd /path/to/CLI-Anything-Eagle
 python3 -m unittest discover -s tests -v
 python3 -m cli_anything.eagle.eagle_cli --json doctor
 python3 -m cli_anything.eagle.eagle_cli --json app info
+python3 -m cli_anything.eagle.eagle_cli --json app show
 python3 -m cli_anything.eagle.eagle_cli --json library summary
 python3 -m cli_anything.eagle.eagle_cli --json smart-folder audit
 python3 -m cli_anything.eagle.eagle_cli --json smart-folder run --name "대화 jpg"
@@ -52,6 +53,8 @@ python3 -m cli_anything.eagle.eagle_cli --json audit dedupe-plan ./dedupe.json -
 python3 -m cli_anything.eagle.eagle_cli --json plan stats ./dedupe.json
 python3 -m cli_anything.eagle.eagle_cli --json tag stats --all --top 10
 python3 -m cli_anything.eagle.eagle_cli --json tag audit --all --top 10
+python3 -m cli_anything.eagle.eagle_cli --json tag recent-live --top 10
+python3 -m cli_anything.eagle.eagle_cli --json tag starred-live --top 10
 python3 -m cli_anything.eagle.eagle_cli --json --dry-run tag normalize --item-id EXAMPLE --trim --collapse-spaces
 python3 -m cli_anything.eagle.eagle_cli --json select save review-set --item-id EXAMPLE
 python3 -m cli_anything.eagle.eagle_cli --json select sample review-set --count 1 --resolve
@@ -108,7 +111,7 @@ python3 -m cli_anything.eagle.eagle_cli report dashboard --help
 
 ## Result
 
-- `0.14.0` checks passed for:
+- `0.15.0` checks passed for:
   - `python3 -m unittest discover -s tests -v`
   - `node --check companion-plugin/plugin.js`
   - `node --check cli_anything/eagle/assets/companion-plugin/plugin.js`

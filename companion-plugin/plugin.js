@@ -12,7 +12,10 @@
   const logPath = path.join(stateRoot, "plugin.log");
   const pluginId = "2f40db08-5ce8-4d72-9fb7-a8fdcb5c1f6b";
   const pluginName = "CLI-Anything Eagle Bridge";
-  const pluginVersion = "0.14.0";
+  const pluginVersion = "0.15.0";
+  const STATUS_HEARTBEAT_MS = 15000;
+  const REQUEST_POLL_MS = 1000;
+  const LIBRARY_SUMMARY_TTL_MS = 60000;
 
   const statusNode = document.getElementById("status");
   const statePathNode = document.getElementById("state-path");
@@ -21,6 +24,9 @@
 
   let isProcessing = false;
   let processedRequests = 0;
+  let cachedLibrary = null;
+  let cachedLibraryExpiresAt = 0;
+  let librarySummaryPromise = null;
 
   function log(message) {
     const line = `${new Date().toISOString()} ${message}`;
@@ -54,14 +60,40 @@
     fs.renameSync(tempPath, targetPath);
   }
 
-  async function collectStatus() {
-    let library = null;
-    try {
-      if (eagle && eagle.library && typeof eagle.library.info === "function") {
-        library = summarizeLibraryInfo(await eagle.library.info());
+  async function getLibrarySummary(options = {}) {
+    const forceRefresh = Boolean(options.forceRefresh);
+    const now = Date.now();
+    if (!forceRefresh && cachedLibrary && now < cachedLibraryExpiresAt) {
+      return cachedLibrary;
+    }
+    if (librarySummaryPromise) {
+      return librarySummaryPromise;
+    }
+
+    librarySummaryPromise = (async () => {
+      try {
+        if (eagle && eagle.library && typeof eagle.library.info === "function") {
+          cachedLibrary = summarizeLibraryInfo(await eagle.library.info());
+          cachedLibraryExpiresAt = Date.now() + LIBRARY_SUMMARY_TTL_MS;
+        }
+      } catch (error) {
+        log(`library.info failed: ${error.message}`);
+      } finally {
+        librarySummaryPromise = null;
       }
-    } catch (error) {
-      log(`library.info failed: ${error.message}`);
+
+      return cachedLibrary;
+    })();
+
+    return librarySummaryPromise;
+  }
+
+  async function collectStatus(options = {}) {
+    const includeLibrary = Boolean(options.includeLibrary);
+    const forceLibraryRefresh = Boolean(options.forceLibraryRefresh);
+    let library = cachedLibrary;
+    if (includeLibrary) {
+      library = await getLibrarySummary({ forceRefresh: forceLibraryRefresh });
     }
     return {
       kind: "eagle-cli-bridge-status",
@@ -165,6 +197,16 @@
     };
   }
 
+  function summarizeTag(tag) {
+    return {
+      name: String((tag && tag.name) || ""),
+      count: Number.isFinite(tag && tag.count) ? tag.count : Number(tag && tag.count) || 0,
+      color: String((tag && tag.color) || ""),
+      groups: Array.isArray(tag && tag.groups) ? tag.groups.map(String) : [],
+      pinyin: String((tag && tag.pinyin) || ""),
+    };
+  }
+
   async function getSelectedItems(limit) {
     if (!eagle || !eagle.item || typeof eagle.item.getSelected !== "function") {
       throw new Error("eagle.item.getSelected is not available in this plugin runtime.");
@@ -213,7 +255,7 @@
       truncated_items: selectedItemCount > selectedItems.length,
       selected_items: selectedItems.map(summarizeItem),
       selected_folders: selectedFolders.map(summarizeFolder),
-      status: await collectStatus(),
+      status: await collectStatus({ includeLibrary: true }),
     };
   }
 
@@ -229,6 +271,42 @@
       selected_count: itemIds.length,
       selected_item_count: itemIds.length,
       status: await collectStatus(),
+    };
+  }
+
+  async function handleShowApp() {
+    if (!eagle || !eagle.app || typeof eagle.app.show !== "function") {
+      throw new Error("eagle.app.show is not available in this plugin runtime. Upgrade to Eagle 4.0 build18 or later.");
+    }
+    const shown = await eagle.app.show();
+    return {
+      shown: Boolean(shown),
+      app_version: eagle.app && eagle.app.version ? String(eagle.app.version) : null,
+      app_build: eagle.app && eagle.app.build !== undefined ? Number(eagle.app.build) : null,
+      locale: eagle.app && eagle.app.locale ? String(eagle.app.locale) : null,
+      status: await collectStatus({ includeLibrary: true }),
+    };
+  }
+
+  async function handleGetRecentTags() {
+    if (!eagle || !eagle.tag || typeof eagle.tag.getRecentTags !== "function") {
+      throw new Error("eagle.tag.getRecentTags is not available in this plugin runtime.");
+    }
+    const tags = await eagle.tag.getRecentTags();
+    return {
+      count: Array.isArray(tags) ? tags.length : 0,
+      rows: (tags || []).map(summarizeTag),
+    };
+  }
+
+  async function handleGetStarredTags() {
+    if (!eagle || !eagle.tag || typeof eagle.tag.getStarredTags !== "function") {
+      throw new Error("eagle.tag.getStarredTags is not available in this plugin runtime. Upgrade to Eagle 4.0 build18 or later.");
+    }
+    const tags = await eagle.tag.getStarredTags();
+    return {
+      count: Array.isArray(tags) ? tags.length : 0,
+      rows: (tags || []).map(summarizeTag),
     };
   }
 
@@ -420,10 +498,16 @@
     try {
       if (request.action === "ping") {
         response.data = await handlePing(request.payload || {});
+      } else if (request.action === "show_app") {
+        response.data = await handleShowApp();
       } else if (request.action === "get_context") {
         response.data = await handleGetContext(request.payload || {});
       } else if (request.action === "get_selected_item_ids") {
         response.data = await handleGetSelectedItemIds();
+      } else if (request.action === "get_recent_tags") {
+        response.data = await handleGetRecentTags();
+      } else if (request.action === "get_starred_tags") {
+        response.data = await handleGetStarredTags();
       } else if (request.action === "select_items") {
         response.data = await handleSelectItems(request.payload || {});
       } else if (request.action === "open_folder") {
@@ -475,8 +559,8 @@
     ensureDirs();
     log(`bridge bootstrap version=${pluginVersion} pid=${process.pid}`);
     await writeStatus();
-    setInterval(writeStatus, 2000);
-    setInterval(pollRequests, 1000);
+    setInterval(writeStatus, STATUS_HEARTBEAT_MS);
+    setInterval(pollRequests, REQUEST_POLL_MS);
     setTimeout(pollRequests, 250);
   }
 

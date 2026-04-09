@@ -56,6 +56,7 @@ python3 -m cli_anything.eagle.eagle_cli --help
 ```bash
 cli-anything-eagle doctor
 cli-anything-eagle app info
+cli-anything-eagle app show
 cli-anything-eagle library summary
 cli-anything-eagle library info
 cli-anything-eagle smart-folder audit
@@ -67,6 +68,8 @@ cli-anything-eagle --json audit duplicates --all --top 5
 cli-anything-eagle --json audit dedupe-plan ./plans/duplicates.json --keyword logo
 cli-anything-eagle --json plan stats ./plans/duplicates.json
 cli-anything-eagle --json tag stats --all --top 10
+cli-anything-eagle --json tag recent-live
+cli-anything-eagle --json tag starred-live
 cli-anything-eagle --json select list
 cli-anything-eagle --json config show
 cli-anything-eagle --json workflow template --list
@@ -241,7 +244,10 @@ cli-anything-eagle --json bridge doctor --skip-ping
 cli-anything-eagle --json --dry-run bridge cleanup --max-age-hours 24
 cli-anything-eagle --json item selected
 cli-anything-eagle --json folder selected
+cli-anything-eagle --json app show
 cli-anything-eagle --dry-run item open --item-id EXAMPLE --window
+cli-anything-eagle --json tag recent-live --top 10
+cli-anything-eagle --json tag starred-live --top 10
 cli-anything-eagle --dry-run tag rename-live "Old Tag" "New Tag"
 cli-anything-eagle --dry-run tag merge-live "Legacy Tag" "Canonical Tag"
 cli-anything-eagle --dry-run item rename-bulk --folder-name References --prefix archived-
@@ -391,9 +397,11 @@ cli-anything-eagle config unset completion_shell
 - `doctor`
 - `config path`, `show`, `set`, `unset`
 - `app info`
+- `app show`
 - `library info`, `history`, `switch`, `icon`, `summary`, `quick-access`
 - `smart-folder list`, `tree`, `show`, `rules`, `audit`, `run`
 - `tag stats`, `audit`, `rename`, `normalize`, `alias-map-apply`
+- `tag recent-live`, `starred-live`
 - `tag rename-live`, `merge-live`
 - `tag-group list`, `show`
 - `folder list`, `tree`, `find`, `selected`, `open`, `recent`, `create`, `ensure`, `ensure-path`, `rename`, `update`
@@ -450,6 +458,9 @@ cli-anything-eagle config unset completion_shell
   `--current-selection`도 내부적으로 이것을 사용합니다.
 - `item selected`, `folder selected`는 companion plugin을 통해 현재 Eagle UI selection을 읽습니다.
   `item open`, `tag rename-live`, `tag merge-live`도 bridge plugin이 활성화되어 있어야 합니다.
+- `app show`는 `eagle.app.show()`에 의존하며, Eagle 문서 기준 build18+ Plugin API 기능입니다.
+- `tag starred-live`는 `eagle.tag.getStarredTags()`에 의존하며, Eagle 문서 기준 build18+ Plugin API 기능입니다.
+  `tag recent-live`는 `eagle.tag.getRecentTags()`만 필요합니다.
 - `bridge cleanup`은 오래된 bridge request/response 산출물만 지웁니다.
   어떤 파일이 지워질지 먼저 보고 싶다면 `--dry-run`을 먼저 사용하세요.
 - 변경 명령은 대부분 `--dry-run`을 지원하므로, 다른 Eagle 사용자와 공유할 때도 먼저 미리볼 수 있습니다.

@@ -2,6 +2,11 @@
 
 This changelog summarizes the releases already reflected in the repository history and documentation.
 
+## 0.15.0
+- Added plugin-backed `app show` so the CLI can bring Eagle's main window to the front through the companion bridge when the runtime supports `eagle.app.show()`.
+- Added plugin-backed `tag recent-live` and `tag starred-live` to surface Eagle's recent and starred tags directly from the Plugin API.
+- Synchronized the bundled companion-plugin asset with the repo plugin so packaged installs keep the same bridge heartbeat, library-summary caching, and live action support.
+
 ## 0.14.0
 - Added `workflow template` so common review, reporting, and archive flows can be scaffolded as ready-to-edit YAML or JSON workflow files.
 - Expanded `plan explain` into a richer summary surface with operation breakdowns and optional saved Markdown/HTML/JSON/CSV explanations.

@@ -28,6 +28,40 @@ class EagleCliTests(unittest.TestCase):
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_app_show_calls_bridge(self, mock_bridge_request, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-app-show",
+                "response": {
+                    "status": "success",
+                    "data": {
+                        "shown": True,
+                        "app_version": "4.0.0",
+                        "app_build": 18,
+                        "locale": "en-US",
+                    },
+                },
+            },
+        }
+        result = self.runner.invoke(cli, ["--json", "app", "show"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertTrue(payload["data"]["shown"])
+        self.assertEqual(payload["data"]["app_build"], 18)
+        mock_bridge_request.assert_called_once_with(
+            "show_app",
+            {},
+            timeout_seconds=15.0,
+            queue_only=False,
+        )
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
     @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
     def test_folder_tree_plain_text(self, mock_folder_list, mock_load, _mock_save):
         from cli_anything.eagle.core.state import SessionState
@@ -1123,6 +1157,76 @@ class EagleCliTests(unittest.TestCase):
         mock_bridge_request.assert_called_once_with(
             "merge_tags",
             {"source": "Legacy", "target": "Canonical"},
+            timeout_seconds=15.0,
+            queue_only=False,
+        )
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_tag_recent_live_calls_bridge(self, mock_bridge_request, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-tag-recent",
+                "response": {
+                    "status": "success",
+                    "data": {
+                        "count": 2,
+                        "rows": [
+                            {"name": "ui", "count": 10},
+                            {"name": "design", "count": 5},
+                        ],
+                    },
+                },
+            },
+        }
+        result = self.runner.invoke(cli, ["--json", "tag", "recent-live", "--top", "1"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["count"], 2)
+        self.assertEqual(payload["data"]["rows"][0]["name"], "ui")
+        self.assertEqual(len(payload["data"]["rows"]), 1)
+        mock_bridge_request.assert_called_once_with(
+            "get_recent_tags",
+            {},
+            timeout_seconds=15.0,
+            queue_only=False,
+        )
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_tag_starred_live_calls_bridge(self, mock_bridge_request, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-tag-starred",
+                "response": {
+                    "status": "success",
+                    "data": {
+                        "count": 1,
+                        "rows": [
+                            {"name": "favorite", "count": 7},
+                        ],
+                    },
+                },
+            },
+        }
+        result = self.runner.invoke(cli, ["--json", "tag", "starred-live"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["count"], 1)
+        self.assertEqual(payload["data"]["rows"][0]["name"], "favorite")
+        mock_bridge_request.assert_called_once_with(
+            "get_starred_tags",
+            {},
             timeout_seconds=15.0,
             queue_only=False,
         )

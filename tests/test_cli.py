@@ -7,11 +7,273 @@ from click.testing import CliRunner
 import yaml
 
 from cli_anything.eagle.eagle_cli import cli
+from cli_anything.eagle.core.client import EagleApiError
 
 
 class EagleCliTests(unittest.TestCase):
     def setUp(self):
         self.runner = CliRunner()
+
+    @patch("cli_anything.eagle.eagle_cli._bridge_status_payload")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.library_info")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_agent_observe_uses_current_selection_items(
+        self,
+        mock_bridge_request,
+        mock_item_info,
+        mock_folder_list,
+        mock_library_info,
+        mock_load,
+        _mock_save,
+        mock_bridge_status,
+    ):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_status.return_value = {"health": "healthy", "plugin_version": "0.17.0"}
+        mock_library_info.return_value = {
+            "status": "success",
+            "data": {"name": "Demo", "path": "/tmp/demo.library", "folders": [], "smartFolders": [], "quickAccess": [], "tagsGroups": []},
+        }
+        mock_folder_list.return_value = {"status": "success", "data": []}
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-observe",
+                "response": {
+                    "status": "success",
+                    "data": {
+                        "selected_item_count": 1,
+                        "selected_folder_count": 0,
+                        "selected_items": [{"id": "abc", "name": "Alpha", "tags": ["ui"], "folders": [], "annotation": "", "url": "", "ext": "png"}],
+                        "selected_folders": [],
+                        "truncated_items": False,
+                    },
+                },
+            },
+        }
+        mock_item_info.return_value = {
+            "status": "success",
+            "data": {"id": "abc", "name": "Alpha", "tags": ["ui"], "folders": [], "annotation": "", "url": "", "ext": "png", "star": 0},
+        }
+        result = self.runner.invoke(cli, ["--json", "agent", "observe"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["working_set_mode"], "current-selection")
+        self.assertEqual(payload["data"]["working_set"]["item_count"], 1)
+        self.assertEqual(payload["data"]["tag_stats"]["total_items"], 1)
+
+    @patch("cli_anything.eagle.eagle_cli._bridge_status_payload")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.library_info")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_agent_observe_tolerates_library_info_error(
+        self,
+        mock_bridge_request,
+        mock_item_info,
+        mock_folder_list,
+        mock_library_info,
+        mock_load,
+        _mock_save,
+        mock_bridge_status,
+    ):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_status.return_value = {"health": "healthy", "plugin_version": "0.17.0"}
+        mock_library_info.side_effect = EagleApiError("library unavailable")
+        mock_folder_list.return_value = {"status": "success", "data": []}
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-observe",
+                "response": {
+                    "status": "success",
+                    "data": {
+                        "selected_item_count": 1,
+                        "selected_folder_count": 0,
+                        "selected_items": [{"id": "abc", "name": "Alpha", "tags": ["ui"], "folders": [], "annotation": "", "url": "", "ext": "png"}],
+                        "selected_folders": [],
+                        "truncated_items": False,
+                    },
+                },
+            },
+        }
+        mock_item_info.return_value = {
+            "status": "success",
+            "data": {"id": "abc", "name": "Alpha", "tags": ["ui"], "folders": [], "annotation": "", "url": "", "ext": "png", "star": 0},
+        }
+        result = self.runner.invoke(cli, ["--json", "agent", "observe"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["working_set_mode"], "current-selection")
+        self.assertEqual(payload["data"]["context"]["library_error"], "library unavailable")
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_agent_plan_writes_current_selection_plan(self, mock_bridge_request, mock_item_info, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-current-selection",
+                "response": {
+                    "status": "success",
+                    "data": {"item_ids": ["abc"], "selected_count": 1},
+                },
+            },
+        }
+        mock_item_info.return_value = {
+            "status": "success",
+            "data": {"id": "abc", "name": "Alpha", "tags": ["old"], "folders": [], "annotation": "", "url": "", "ext": "png"},
+        }
+        with self.runner.isolated_filesystem():
+            result = self.runner.invoke(
+                cli,
+                [
+                    "--json",
+                    "agent",
+                    "plan",
+                    "agent-plan.json",
+                    "--goal",
+                    "Review current selection",
+                    "--current-selection",
+                    "--add-tag",
+                    "reviewed",
+                ],
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+            with open("agent-plan.json", "r", encoding="utf-8") as handle:
+                plan = json.load(handle)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["matched_count"], 1)
+        self.assertEqual(plan["context"]["agent"]["goal"], "Review current selection")
+        self.assertEqual(plan["operations"][0]["payload"]["tags"], ["old", "reviewed"])
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_list")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.folder_list")
+    @patch("cli_anything.eagle.eagle_cli._bridge_request")
+    def test_agent_plan_accepts_current_folder_selector(
+        self, mock_bridge_request, mock_folder_list, mock_item_list, mock_load, _mock_save
+    ):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_bridge_request.return_value = {
+            "status": "success",
+            "data": {
+                "request_id": "req-current-folder",
+                "response": {
+                    "status": "success",
+                    "data": {
+                        "selected_folder_count": 1,
+                        "selected_folders": [{"id": "child", "name": "Child"}],
+                    },
+                },
+            },
+        }
+        mock_folder_list.return_value = {
+            "status": "success",
+            "data": [{"id": "root", "name": "Root", "children": [{"id": "child", "name": "Child", "children": []}]}],
+        }
+        mock_item_list.return_value = {
+            "status": "success",
+            "data": [{"id": "abc", "name": "Alpha", "tags": [], "folders": ["child"], "annotation": "", "url": "", "ext": "png"}],
+        }
+        with self.runner.isolated_filesystem():
+            result = self.runner.invoke(
+                cli,
+                [
+                    "--json",
+                    "agent",
+                    "plan",
+                    "agent-folder-plan.json",
+                    "--goal",
+                    "Review current folder",
+                    "--current-folder",
+                    "--add-tag",
+                    "reviewed",
+                ],
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+            with open("agent-folder-plan.json", "r", encoding="utf-8") as handle:
+                plan = json.load(handle)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["matched_count"], 1)
+        self.assertTrue(plan["context"]["selector"]["use_current_folder"])
+        self.assertEqual(plan["context"]["selector"]["current_folders"][0]["path"], "Root/Child")
+        self.assertEqual(mock_item_list.call_args.kwargs["folders"], "child")
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.raw_request")
+    def test_agent_apply_verifies_updated_item(self, mock_raw_request, mock_item_info, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_raw_request.return_value = {"status": "success", "data": {"ok": True}}
+        mock_item_info.return_value = {
+            "status": "success",
+            "data": {"id": "abc", "name": "Alpha", "tags": ["reviewed"], "folders": [], "annotation": "", "url": "", "star": 0},
+        }
+        with self.runner.isolated_filesystem():
+            with open("agent-plan.json", "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "kind": "eagle-cli-plan",
+                        "command": "agent plan",
+                        "context": {"agent": {"goal": "Review selection"}},
+                        "operations": [{"method": "POST", "endpoint": "/api/item/update", "payload": {"id": "abc", "tags": ["reviewed"]}}],
+                    },
+                    handle,
+                )
+            result = self.runner.invoke(cli, ["--json", "agent", "apply", "agent-plan.json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["data"]["verification"]["verified_count"], 1)
+        self.assertEqual(payload["status"], "success")
+
+    @patch("cli_anything.eagle.eagle_cli.SessionState.save")
+    @patch("cli_anything.eagle.eagle_cli.SessionState.load")
+    @patch("cli_anything.eagle.eagle_cli.EagleClient.item_info")
+    def test_agent_verify_reports_mismatch(self, mock_item_info, mock_load, _mock_save):
+        from cli_anything.eagle.core.state import SessionState
+
+        mock_load.return_value = SessionState()
+        mock_item_info.return_value = {
+            "status": "success",
+            "data": {"id": "abc", "name": "Alpha", "tags": [], "folders": [], "annotation": "", "url": "", "star": 0},
+        }
+        with self.runner.isolated_filesystem():
+            with open("agent-plan.json", "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "kind": "eagle-cli-plan",
+                        "command": "agent plan",
+                        "context": {"agent": {"goal": "Review selection"}},
+                        "operations": [{"method": "POST", "endpoint": "/api/item/update", "payload": {"id": "abc", "tags": ["reviewed"]}}],
+                    },
+                    handle,
+                )
+            result = self.runner.invoke(cli, ["--json", "agent", "verify", "agent-plan.json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["status"], "warning")
+        self.assertEqual(payload["data"]["verification"]["mismatch_count"], 1)
 
     @patch("cli_anything.eagle.eagle_cli.SessionState.save")
     @patch("cli_anything.eagle.eagle_cli.SessionState.load")

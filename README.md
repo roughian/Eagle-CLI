@@ -11,7 +11,8 @@ cleanup audits, duplicate cleanup plan generation, tag audits and normalization,
 saved selection sets, reusable reports, declarative workflows, manifest-driven
 ingestion, incremental import watching, plan merge/filter/split/validate
 tooling, shell-completion helpers, document schemas, persistent config defaults,
-dashboard reports, high-level organize flows,
+dashboard reports, high-level organize flows, agent observation and
+plan/apply/verify loops,
 and a companion bridge plugin for selection, open, tag, name, and folder
 operations that are not available through the local HTTP API alone, plus bridge
 health diagnostics and cleanup helpers.
@@ -82,6 +83,11 @@ cli-anything-eagle --json plan explain ./plans/duplicates.json --output ./plans/
 cli-anything-eagle report index ./reports/index.md ./reports ./plans
 cli-anything-eagle report dashboard ./reports/dashboard.md --format md --all
 cli-anything-eagle --json workflow validate ./workflow.yml
+cli-anything-eagle --json agent observe --output ./reports/agent-observe.json
+cli-anything-eagle --json agent plan ./plans/review-selection.json --goal "Review current selection" --current-selection --add-tag reviewed
+cli-anything-eagle --json agent plan ./plans/review-folder.json --goal "Review current folder" --current-folder --add-tag reviewed
+cli-anything-eagle --json --dry-run agent apply ./plans/review-selection.json --save-results ./plans/review-selection-preview.json
+cli-anything-eagle --json agent verify ./plans/review-selection.json
 cli-anything-eagle --json bridge status
 cli-anything-eagle --json bridge selected-item-ids
 cli-anything-eagle --json report current-context ./reports/current-context.json
@@ -418,9 +424,39 @@ cli-anything-eagle config show
 cli-anything-eagle config unset completion_shell
 ```
 
+Run a bridge-aware agent loop for AI-safe Eagle control:
+
+```bash
+cli-anything-eagle --json agent observe --output ./reports/agent-observe.json
+cli-anything-eagle --json agent plan ./plans/review-selection.json \
+  --goal "Review current selection" \
+  --current-selection \
+  --add-tag reviewed \
+  --save-snapshot ./snapshots/review-selection.json
+cli-anything-eagle --json --dry-run agent apply ./plans/review-selection.json \
+  --save-results ./plans/review-selection-preview.json
+cli-anything-eagle --json agent apply ./plans/review-selection.json \
+  --save-results ./plans/review-selection-results.json
+cli-anything-eagle --json agent verify ./plans/review-selection.json
+```
+
+The same flow can use the live Eagle folder too:
+
+```bash
+cli-anything-eagle --json agent plan ./plans/review-folder.json \
+  --goal "Review current folder" \
+  --current-folder \
+  --add-tag reviewed
+cli-anything-eagle --json agent plan ./plans/move-into-current-folder.json \
+  --goal "Move current selection into the current folder" \
+  --current-selection \
+  --move-to-current-folder
+```
+
 ## Covered Commands
 
 - `doctor`
+- `agent observe`, `plan`, `apply`, `verify`
 - `config path`, `show`, `set`, `unset`
 - `app info`
 - `app show`
@@ -431,18 +467,18 @@ cli-anything-eagle config unset completion_shell
 - `tag rename-live`, `merge-live`
 - `tag-group list`, `show`
 - `folder list`, `tree`, `find`, `selected`, `open`, `recent`, `create`, `ensure`, `ensure-path`, `rename`, `update`
-- `item list`, `selected`, `select`, `open`, `export`, `stats`, `info`, `thumbnail`, `update`, `bulk-update`, `rename-bulk`, `move-bulk`
+- `item list`, `selected`, `select`, `open`, `export`, `stats`, `info`, `thumbnail`, `update`, `bulk-update`, `rename-bulk`, `move-bulk`, `move-to-current-folder`
 - `item add-path`, `add-paths`, `add-dir`, `add-url`, `add-urls`, `add-bookmark`
 - `item trash`, `refresh-palette`, `refresh-thumbnail`
-- `select list`, `save`, `show`, `delete`, `sample`, `diff`
-- `report library`, `tags`, `folders`, `trend`
+- `select list`, `save`, `show`, `delete`, `sample`, `diff`, `save-current-folder`
+- `report library`, `index`, `tags`, `folders`, `trend`, `current-context`
 - `report dashboard`
 - `preset list`, `show`, `delete`, `export`, `import`, `save-item-list`, `run-item-list`, `save-bulk-update`, `run-bulk-update`
 - `snapshot create`, `show`, `diff`, `restore`
 - `audit duplicates`, `cleanup`, `cleanup-plan`, `dedupe-plan`
 - `organize apply`
 - `bridge status`, `doctor`, `context`, `selected-item-ids`, `open-folder`, `select-items`, `cleanup`, `export-plugin`, `install-plugin`, `ping`
-- `workflow validate`, `run`
+- `workflow template`, `validate`, `run`
 - `ingest manifest`
 - `watch import-dir`
 - `completion script`
@@ -483,6 +519,10 @@ cli-anything-eagle config unset completion_shell
 - `item rename-bulk`, `item move-bulk`, and `organize apply` rely on the
   companion bridge plugin when names or folder assignments must change through
   Eagle's Plugin API instead of the local HTTP API.
+- `agent observe` can still run when Eagle's library metadata endpoint is
+  temporarily unavailable, but `agent observe`, `agent plan
+  --current-selection`, `agent plan --current-folder`, and `agent plan
+  --move-to-current-folder` depend on the companion bridge being healthy.
 - `bridge install-plugin` copies the bundled service plugin into Eagle's plugin
   directory. When no explicit plugin directory is passed, it now refreshes all
   detected Eagle plugin roots. If Eagle is already open, restart it once so the

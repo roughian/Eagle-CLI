@@ -5,7 +5,7 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -348,6 +348,507 @@ def app_show(app: AppContext, bridge_timeout: float, queue_only: bool) -> None:
                 "app_version": payload.get("app_version"),
                 "app_build": payload.get("app_build"),
                 "locale": payload.get("locale"),
+            },
+        },
+    )
+
+
+@cli.group()
+def agent() -> None:
+    """Agent orchestration helpers."""
+
+
+@agent.command("observe")
+@click.option("--item-limit", type=click.IntRange(1, None), default=20, show_default=True, help="Maximum selected item rows to fetch from the live Eagle UI context.")
+@click.option("--folder-limit", type=click.IntRange(1, None), default=50, show_default=True, help="Maximum items to inspect when the current Eagle folder is used as the working set.")
+@click.option("--top", type=click.IntRange(1, None), default=10, show_default=True, help="Top-N rows for tag and cleanup summaries.")
+@click.option("--output", "output_file", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--format", "report_format", type=click.Choice(["auto", "json", "md", "html"]), default="auto", show_default=True)
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@pass_app
+def agent_observe(
+    app: AppContext,
+    item_limit: int,
+    folder_limit: int,
+    top: int,
+    output_file: Path | None,
+    report_format: str,
+    bridge_timeout: float,
+) -> None:
+    library_error = None
+    try:
+        library_info = _library_info_data(app)
+    except EagleApiError as exc:
+        library_info = {}
+        library_error = str(exc)
+    bridge_status = _bridge_status_payload()
+    context_error = None
+    try:
+        bridge_result, context_payload = _current_context_payload(app, item_limit=item_limit, bridge_timeout=bridge_timeout)
+    except (click.ClickException, EagleApiError) as exc:
+        bridge_result = None
+        context_payload = {}
+        context_error = str(exc)
+
+    working_set_mode = "none"
+    working_set_items: list[dict[str, Any]] = []
+    working_set_query: dict[str, Any] = {}
+    working_set_notes: list[str] = []
+    selected_items = list(context_payload.get("selected_items") or [])
+    selected_folders = list(context_payload.get("selected_folders") or [])
+
+    if selected_items:
+        working_set_mode = "current-selection"
+        selected_ids = tuple(str(item.get("id")) for item in selected_items if str(item.get("id")))
+        working_set_items = _collect_target_items(
+            app,
+            item_ids=selected_ids,
+            fetch_all=False,
+            limit=len(selected_ids) or 1,
+            offset=0,
+            order_by=None,
+            keyword=None,
+            ext=None,
+            tags=(),
+            folders=(),
+            folder_names=(),
+            folder_paths=(),
+        )
+        working_set_query = {"item_ids": list(selected_ids), "source": "current-selection"}
+        if bool(context_payload.get("truncated_items")):
+            working_set_notes.append("Current Eagle selection exceeded --item-limit; the working set was truncated.")
+    elif len(selected_folders) == 1:
+        working_set_mode = "current-folder"
+        selected_folder = selected_folders[0]
+        working_set_items_query = _query_items(
+            app,
+            fetch_all=False,
+            limit=folder_limit,
+            offset=0,
+            order_by=None,
+            keyword=None,
+            ext=None,
+            tags=(),
+            folders=(str(selected_folder.get("id") or ""),),
+            folder_names=(),
+            folder_paths=(),
+        )
+        working_set_items = list(working_set_items_query["items"])
+        working_set_query = {
+            **working_set_items_query["query"],
+            "source": "current-folder",
+            "folder": selected_folder,
+            "limit": folder_limit,
+        }
+    elif len(selected_folders) > 1:
+        working_set_mode = "multi-folder-context"
+        working_set_notes.append("Multiple Eagle folders are currently selected; choose one folder or a direct item selection for agent planning.")
+    elif context_error:
+        working_set_mode = "bridge-unavailable"
+        working_set_notes.append(context_error)
+    else:
+        working_set_mode = "context-only"
+        working_set_notes.append("No current Eagle item or folder selection was reported by the companion bridge.")
+    if library_error:
+        working_set_notes.append(f"Library metadata was unavailable during observation: {library_error}")
+
+    cleanup = _build_cleanup_report(working_set_items, sample_limit=top) if working_set_items else None
+    tag_stats = _build_tag_stats(working_set_items, top=top) if working_set_items else None
+    tag_audit = _build_tag_audit(working_set_items, top=top) if working_set_items else None
+    suggestions = _agent_observe_suggestions(
+        working_set_mode,
+        selected_items=selected_items,
+        selected_folders=selected_folders,
+        current_folder_rows=selected_folders,
+    )
+    document = {
+        "title": "CLI-Anything Eagle Agent Observation",
+        "generated_at": _utc_now(),
+        "working_set_mode": working_set_mode,
+        "library": build_library_summary(library_info),
+        "bridge_status": bridge_status,
+        "context": {
+            "bridge_request_id": bridge_result["data"]["request_id"] if bridge_result is not None else None,
+            "selected_item_count": context_payload.get("selected_item_count", len(selected_items)),
+            "selected_folder_count": context_payload.get("selected_folder_count", len(selected_folders)),
+            "selected_items": selected_items,
+            "selected_folders": selected_folders,
+            "truncated_items": bool(context_payload.get("truncated_items")),
+            "error": context_error,
+            "library_error": library_error,
+        },
+        "working_set": {
+            "item_count": len(working_set_items),
+            "query": working_set_query,
+            "notes": working_set_notes,
+            "sample_ids": [str(item.get("id")) for item in working_set_items[:10] if str(item.get("id"))],
+        },
+        "cleanup": cleanup,
+        "tag_stats": tag_stats,
+        "tag_audit": tag_audit,
+        "suggestions": suggestions,
+    }
+    resolved_format = None
+    if output_file is not None:
+        resolved_format = _write_report(output_file, document, requested_format=_effective_report_format(app, report_format))
+    _emit_and_remember(
+        app,
+        "agent observe",
+        {
+            "status": "success",
+            "data": {
+                **document,
+                "saved_to": str(output_file) if output_file is not None else None,
+                "format": resolved_format,
+            },
+        },
+    )
+
+
+@agent.command("plan")
+@click.argument("output_file", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--goal", required=True, help="Short natural-language goal to record in the plan metadata.")
+@item_selector_source_options
+@click.option("--current-folder", "use_current_folder", is_flag=True, help="Use the currently selected Eagle folder as a live folder filter.")
+@click.option("--current-folder-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@item_filter_options
+@click.option("--set-tag", "set_tags", multiple=True)
+@click.option("--add-tag", "add_tags", multiple=True)
+@click.option("--annotation", default=None)
+@click.option("--url", "source_url", default=None)
+@click.option("--star", type=click.IntRange(0, 5), default=None)
+@click.option("--target-folder-id", default=None)
+@click.option("--target-folder-name", default=None)
+@click.option("--target-folder-path", default=None)
+@click.option("--ensure-target-path", default=None)
+@click.option("--move-to-current-folder", is_flag=True, help="Use the currently selected Eagle folder as the move target.")
+@click.option("--name-prefix", default="")
+@click.option("--name-suffix", default="")
+@click.option("--replace-from", default=None)
+@click.option("--replace-to", default="")
+@click.option("--regex-from", default=None)
+@click.option("--regex-to", default="")
+@click.option("--name-template", default=None, help="Final rename template using {name}, {original}, {ext}, {id}, and {index}.")
+@click.option("--strip", "strip_names", is_flag=True)
+@click.option("--max-items", type=click.IntRange(1, None), default=None, help="Refuse to continue if more than this many items match.")
+@click.option("--require-match", type=click.IntRange(1, None), default=None, help="Require at least this many matched items.")
+@click.option("--skip-unchanged", is_flag=True)
+@click.option("--save-snapshot", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@pass_app
+def agent_plan(
+    app: AppContext,
+    output_file: Path,
+    goal: str,
+    item_ids: tuple[str, ...],
+    item_file: Path | None,
+    use_last: bool,
+    selection_name: str | None,
+    use_current_selection: bool,
+    current_selection_timeout: float,
+    use_current_folder: bool,
+    current_folder_timeout: float,
+    fetch_all: bool,
+    limit: int,
+    offset: int,
+    order_by: str | None,
+    keyword: str | None,
+    ext: str | None,
+    tags: tuple[str, ...],
+    folders: tuple[str, ...],
+    folder_names: tuple[str, ...],
+    folder_paths: tuple[str, ...],
+    set_tags: tuple[str, ...],
+    add_tags: tuple[str, ...],
+    annotation: str | None,
+    source_url: str | None,
+    star: int | None,
+    target_folder_id: str | None,
+    target_folder_name: str | None,
+    target_folder_path: str | None,
+    ensure_target_path: str | None,
+    move_to_current_folder: bool,
+    name_prefix: str,
+    name_suffix: str,
+    replace_from: str | None,
+    replace_to: str,
+    regex_from: str | None,
+    regex_to: str,
+    name_template: str | None,
+    strip_names: bool,
+    max_items: int | None,
+    require_match: int | None,
+    skip_unchanged: bool,
+    save_snapshot: Path | None,
+) -> None:
+    current_folder_rows = _current_folder_records(app, bridge_timeout=current_folder_timeout, required=True) if use_current_folder else []
+    merged_folders = tuple(_unique_preserve_order([*folders, *(record.id for record in current_folder_rows)]))
+    _validate_item_selector_request(
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        fetch_all=fetch_all,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=merged_folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    resolved_item_ids = _resolve_item_selector_ids(
+        app,
+        item_ids=item_ids,
+        item_file=item_file,
+        use_last=use_last,
+        selection_name=selection_name,
+        use_current_selection=use_current_selection,
+        current_selection_timeout=current_selection_timeout,
+    )
+    items = _collect_target_items(
+        app,
+        item_ids=resolved_item_ids,
+        fetch_all=fetch_all,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        keyword=keyword,
+        ext=ext,
+        tags=tags,
+        folders=merged_folders,
+        folder_names=folder_names,
+        folder_paths=folder_paths,
+    )
+    matched_count = _apply_item_guardrails(
+        items,
+        max_items=max_items,
+        require_match=require_match,
+        save_matches=None,
+    )
+    if save_snapshot is not None:
+        _write_snapshot(save_snapshot, _snapshot_document("agent plan", items, context={"goal": goal}))
+
+    metadata_requested = any([set_tags, add_tags, annotation is not None, source_url is not None, star is not None])
+    rename_requested = any([name_prefix, name_suffix, replace_from is not None, regex_from, name_template, strip_names])
+    explicit_move_requested = any([target_folder_id, target_folder_name, target_folder_path, ensure_target_path])
+    if move_to_current_folder and explicit_move_requested:
+        raise click.ClickException("Use either --move-to-current-folder or an explicit target folder selector, not both.")
+    move_requested = move_to_current_folder or explicit_move_requested
+    if not any([metadata_requested, rename_requested, move_requested]):
+        raise click.ClickException("Provide at least one planned action: metadata, rename, or move.")
+
+    planning_app = replace(app, dry_run=True)
+
+    metadata_result = None
+    if metadata_requested:
+        metadata_result = _bulk_update_result(
+            planning_app,
+            item_ids=tuple(str(item.get("id")) for item in items if str(item.get("id"))),
+            item_file=None,
+            use_last=False,
+            selection_name=None,
+            use_current_selection=False,
+            current_selection_timeout=DEFAULT_WAIT_SECONDS,
+            fetch_all=False,
+            limit=len(items) or 1,
+            offset=0,
+            order_by=None,
+            keyword=None,
+            ext=None,
+            tags=(),
+            folders=(),
+            folder_names=(),
+            folder_paths=(),
+            set_tags=set_tags,
+            add_tags=add_tags,
+            annotation=annotation,
+            source_url=source_url,
+            star=star,
+            max_items=matched_count,
+            require_match=0,
+            skip_unchanged=skip_unchanged,
+            save_matches=None,
+            save_plan=None,
+            source_items=items,
+        )
+
+    ensure_result = None
+    target_folder = None
+    move_operations: list[dict[str, Any]] = []
+    move_skipped: list[dict[str, Any]] = []
+    target_source = None
+    if move_requested:
+        if move_to_current_folder:
+            target_folder = _current_folder_record(app, bridge_timeout=current_folder_timeout)
+            ensure_result = {"status": "success", "data": {"leaf_id": target_folder.id, "leaf_path": target_folder.path}}
+            target_source = "current-folder"
+        else:
+            ensure_result, target_folder = _resolve_move_target(
+                app,
+                target_folder_id=target_folder_id,
+                target_folder_name=target_folder_name,
+                target_folder_path=target_folder_path,
+                ensure_target_path=ensure_target_path,
+            )
+            target_source = "explicit-target"
+        move_operations, move_skipped = _build_move_operations(
+            items,
+            target_folder_id=target_folder.id if target_folder is not None else "",
+            target_folder_path=target_folder.path if target_folder is not None else "",
+            skip_unchanged=skip_unchanged,
+        )
+
+    rename_operations: list[dict[str, Any]] = []
+    rename_skipped: list[dict[str, Any]] = []
+    if rename_requested:
+        rename_operations, rename_skipped = _build_rename_operations(
+            items,
+            prefix=name_prefix,
+            suffix=name_suffix,
+            replace_from=replace_from,
+            replace_to=replace_to,
+            regex_from=regex_from,
+            regex_to=regex_to,
+            name_template=name_template,
+            strip_names=strip_names,
+            skip_unchanged=skip_unchanged,
+        )
+
+    operations = _organize_plan_operations(
+        metadata_result=metadata_result,
+        rename_operations=rename_operations,
+        move_operations=move_operations,
+    )
+    if not operations:
+        raise click.ClickException("No changes were planned after applying the current filters and skip rules.")
+
+    context = {
+        "agent": {
+            "goal": goal,
+            "planned_at": _utc_now(),
+            "verification": _verification_spec_from_operations(operations),
+        },
+        "matched_count": matched_count,
+        "operation_count": len(operations),
+        "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+        "target_folder": _folder_row(target_folder),
+        "target_source": target_source,
+        "ensure_result": ensure_result,
+        "selector": {
+            **_item_selector_context(
+                item_ids=resolved_item_ids,
+                selection_name=selection_name,
+                use_last=use_last,
+                use_current_selection=use_current_selection,
+                fetch_all=fetch_all,
+                limit=limit,
+                offset=offset,
+                order_by=order_by,
+                keyword=keyword,
+                ext=ext,
+                tags=tags,
+                folders=merged_folders,
+                folder_names=folder_names,
+                folder_paths=folder_paths,
+            ),
+            "use_current_folder": use_current_folder,
+            "current_folders": [_folder_row(record) for record in current_folder_rows],
+        },
+        "rename_skipped": rename_skipped,
+        "move_skipped": move_skipped,
+    }
+    _write_plan(output_file, _plan_document("agent plan", operations, context=context))
+    _emit_and_remember(
+        app,
+        "agent plan",
+        {
+            "status": "success",
+            "data": {
+                "goal": goal,
+                "plan_file": str(output_file),
+                "matched_count": matched_count,
+                "operation_count": len(operations),
+                "target_folder": _folder_row(target_folder),
+                "target_source": target_source,
+                "saved_snapshot": str(save_snapshot) if save_snapshot is not None else None,
+                "plan_stats": _plan_stats(output_file, _plan_document("agent plan", operations, context=context), operations),
+            },
+        },
+    )
+
+
+@agent.command("apply")
+@click.argument("plan_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--bridge-timeout", type=float, default=DEFAULT_WAIT_SECONDS, show_default=True)
+@click.option("--queue-only", is_flag=True, help="Queue bridge work without waiting for Eagle to process it.")
+@click.option("--save-results", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--verify/--no-verify", default=True, show_default=True)
+@pass_app
+def agent_apply(
+    app: AppContext,
+    plan_file: Path,
+    bridge_timeout: float,
+    queue_only: bool,
+    save_results: Path | None,
+    verify: bool,
+) -> None:
+    data = _load_data_file(plan_file)
+    operations = _extract_operations_from_document(data)
+    if not operations:
+        raise click.ClickException("No operations found in the plan file.")
+    if app.dry_run:
+        response = {
+            "status": "dry-run",
+            "data": {
+                "plan_file": str(plan_file),
+                "operations": operations,
+                "verify": verify,
+                "saved_results": str(save_results) if save_results is not None else None,
+            },
+        }
+        if save_results is not None:
+            _write_manifest(save_results, response)
+        _emit_and_remember(app, "agent apply", response)
+        return
+
+    results = _execute_plan_operations(app, operations, bridge_timeout=bridge_timeout, queue_only=queue_only)
+    verification = _verify_operations(app, operations) if verify else None
+    status = "warning" if verification and verification.get("mismatch_count", 0) else "success"
+    response = {
+        "status": status,
+        "data": {
+            "plan_file": str(plan_file),
+            "goal": ((data.get("context") or {}).get("agent") or {}).get("goal"),
+            "applied_count": len(results),
+            "results": results,
+            "verification": verification,
+            "saved_results": str(save_results) if save_results is not None else None,
+        },
+    }
+    if save_results is not None:
+        _write_manifest(save_results, response)
+    _emit_and_remember(app, "agent apply", response)
+
+
+@agent.command("verify")
+@click.argument("plan_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@pass_app
+def agent_verify(app: AppContext, plan_file: Path) -> None:
+    data = _load_data_file(plan_file)
+    operations = _extract_operations_from_document(data)
+    if not operations:
+        raise click.ClickException("No operations found in the plan file.")
+    verification = _verify_operations(app, operations)
+    status = "warning" if verification.get("mismatch_count", 0) else "success"
+    _emit_and_remember(
+        app,
+        "agent verify",
+        {
+            "status": status,
+            "data": {
+                "plan_file": str(plan_file),
+                "goal": ((data.get("context") or {}).get("agent") or {}).get("goal"),
+                "verification": verification,
             },
         },
     )
@@ -6947,6 +7448,7 @@ def _bulk_update_result(
     skip_unchanged: bool,
     save_matches: Path | None,
     save_plan: Path | None,
+    source_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     _validate_bulk_update_request(
         item_ids=item_ids,
@@ -6977,7 +7479,7 @@ def _bulk_update_result(
         current_selection_timeout=current_selection_timeout,
     )
 
-    source_items = _collect_target_items(
+    source_items = list(source_items) if source_items is not None else _collect_target_items(
         app,
         item_ids=resolved_item_ids,
         fetch_all=fetch_all,
@@ -8877,6 +9379,194 @@ def _extract_operations_from_document(data: Any) -> list[dict[str, Any]]:
         if isinstance(nested_operations, list):
             return nested_operations
     return []
+
+
+def _execute_plan_operations(
+    app: AppContext,
+    operations: list[dict[str, Any]],
+    *,
+    bridge_timeout: float,
+    queue_only: bool,
+) -> list[dict[str, Any]]:
+    results = []
+    for operation in operations:
+        if operation.get("kind") == "bridge":
+            response = _bridge_request(
+                operation["action"],
+                operation.get("payload") or {},
+                timeout_seconds=bridge_timeout,
+                queue_only=queue_only,
+            )
+            results.append(
+                {
+                    "kind": "bridge",
+                    "action": operation["action"],
+                    "status": response.get("status", "success"),
+                    "description": operation.get("description"),
+                }
+            )
+        else:
+            response = app.client.raw_request(
+                operation.get("method", "POST"),
+                operation["endpoint"],
+                payload=operation.get("payload"),
+            )
+            results.append(
+                {
+                    "kind": "http",
+                    "endpoint": operation["endpoint"],
+                    "method": operation.get("method", "POST"),
+                    "status": response.get("status", "success"),
+                    "description": operation.get("description"),
+                }
+            )
+    return results
+
+
+def _verification_spec_from_operations(operations: list[dict[str, Any]]) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    unsupported: list[dict[str, Any]] = []
+    for operation in operations:
+        if operation.get("kind") == "bridge":
+            action = str(operation.get("action") or "")
+            if action == "rename_items":
+                for row in (operation.get("payload") or {}).get("operations") or []:
+                    checks.append(
+                        {
+                            "kind": "rename",
+                            "item_id": str(row.get("item_id") or ""),
+                            "expected_name": row.get("new_name"),
+                        }
+                    )
+            elif action == "move_items":
+                for row in (operation.get("payload") or {}).get("operations") or []:
+                    checks.append(
+                        {
+                            "kind": "move",
+                            "item_id": str(row.get("item_id") or ""),
+                            "expected_folders": [str(folder_id) for folder_id in row.get("folder_ids") or [] if str(folder_id)],
+                        }
+                    )
+            else:
+                unsupported.append({"kind": "bridge", "action": action, "description": operation.get("description")})
+            continue
+
+        endpoint = str(operation.get("endpoint") or "")
+        payload = operation.get("payload") or {}
+        item_id = str(payload.get("id") or "")
+        if endpoint == "/api/item/update" and item_id:
+            for field in ["tags", "annotation", "url", "star"]:
+                if field in payload:
+                    checks.append(
+                        {
+                            "kind": "metadata",
+                            "field": field,
+                            "item_id": item_id,
+                            "expected": payload.get(field),
+                        }
+                    )
+        else:
+            unsupported.append(
+                {
+                    "kind": "http",
+                    "endpoint": endpoint,
+                    "method": str(operation.get("method") or "POST"),
+                    "description": operation.get("description"),
+                }
+            )
+    return {
+        "supported_checks": checks,
+        "unsupported_operations": unsupported,
+        "supported_check_count": len(checks),
+        "unsupported_count": len(unsupported),
+    }
+
+
+def _normalize_verification_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return value
+
+
+def _verify_operations(app: AppContext, operations: list[dict[str, Any]]) -> dict[str, Any]:
+    spec = _verification_spec_from_operations(operations)
+    cache: dict[str, dict[str, Any]] = {}
+    verified: list[dict[str, Any]] = []
+    mismatches: list[dict[str, Any]] = []
+
+    def load_item(item_id: str) -> dict[str, Any]:
+        if item_id not in cache:
+            cache[item_id] = app.client.item_info(item_id).get("data") or {}
+        return cache[item_id]
+
+    for check in spec["supported_checks"]:
+        item_id = str(check.get("item_id") or "")
+        if not item_id:
+            continue
+        item = load_item(item_id)
+        if check["kind"] == "rename":
+            actual = str(item.get("name") or "")
+            expected = str(check.get("expected_name") or "")
+            target_field = "name"
+        elif check["kind"] == "move":
+            actual = [str(folder_id) for folder_id in item.get("folders") or [] if str(folder_id)]
+            expected = [str(folder_id) for folder_id in check.get("expected_folders") or [] if str(folder_id)]
+            target_field = "folders"
+        else:
+            field = str(check.get("field") or "")
+            actual = _normalize_verification_value(item.get(field))
+            expected = _normalize_verification_value(check.get("expected"))
+            target_field = field
+        row = {
+            "item_id": item_id,
+            "field": target_field,
+            "expected": expected,
+            "actual": actual,
+        }
+        if actual == expected:
+            verified.append(row)
+        else:
+            mismatches.append(row)
+
+    return {
+        "supported_check_count": spec["supported_check_count"],
+        "unsupported_count": spec["unsupported_count"],
+        "verified_count": len(verified),
+        "mismatch_count": len(mismatches),
+        "verified": verified,
+        "mismatches": mismatches,
+        "unsupported": spec["unsupported_operations"],
+    }
+
+
+def _agent_observe_suggestions(
+    working_set_mode: str,
+    *,
+    selected_items: list[dict[str, Any]],
+    selected_folders: list[dict[str, Any]],
+    current_folder_rows: list[dict[str, Any]],
+) -> list[str]:
+    if working_set_mode == "current-selection" and selected_items:
+        return [
+            "agent plan <plan.json> --goal \"review current selection\" --current-selection --add-tag reviewed",
+            "select save-current <name>",
+            "organize apply --current-selection ...",
+        ]
+    if working_set_mode == "current-folder" and selected_folders:
+        return [
+            "agent plan <plan.json> --goal \"organize current folder\" --current-folder ...",
+            "select save-current-folder <name>",
+            "workflow run <workflow.yml> with selection.current_folder=true",
+        ]
+    if working_set_mode == "multi-folder-context" and current_folder_rows:
+        return [
+            "Narrow the Eagle UI to a single folder, then rerun `agent observe`.",
+            "Or use direct selectors such as --selection, --current-selection, or --item-id for planning.",
+        ]
+    return [
+        "Select items or a single folder in Eagle, then rerun `agent observe`.",
+        "You can also build plans from saved selectors via `agent plan ... --selection <name>`.",
+    ]
 
 
 def _plan_stats(plan_file: Path, data: dict[str, Any], operations: list[dict[str, Any]]) -> dict[str, Any]:

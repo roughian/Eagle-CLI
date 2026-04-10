@@ -2,6 +2,12 @@
 
 This changelog summarizes the releases already reflected in the repository history and documentation.
 
+## 0.17.0
+- Added `agent observe` to turn the live Eagle context into a reusable observation report with bridge, cleanup, and tag summaries.
+- Added `agent plan` so AI-safe plans can be built from the current selection, the current folder, saved selectors, and move-to-current-folder targets before any mutation happens.
+- Added `agent apply` to execute saved agent plans with optional verification and saved result manifests, and `agent verify` to re-check convergence after the run.
+- Hardened the new observation path so `agent observe` still succeeds when Eagle's library metadata endpoint is temporarily unavailable.
+
 ## 0.16.0
 - Added `select save-current-folder`, `item move-to-current-folder`, and `report current-context` so plugin-backed Eagle UI state can be turned into saved selections, reports, and move targets without copying folder IDs by hand.
 - Promoted the companion bridge `get_context` response into shared CLI helpers for current-folder resolution, so `folder selected` and other current-context flows resolve stable folder paths when the local HTTP API knows them.

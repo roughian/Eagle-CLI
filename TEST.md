@@ -21,6 +21,7 @@
 - Validate persistent config defaults and combined dashboard reporting.
 - Validate bridge health summaries, doctor output, and cleanup dry runs.
 - Validate plugin-backed selection reads, item opening, and live tag actions.
+- Validate agent observation, planning, apply-preview, and verification flows.
 - Run a small live smoke check separately against read-only endpoints only.
 
 ## Commands
@@ -80,6 +81,16 @@ python3 -m cli_anything.eagle.eagle_cli --json workflow template --list
 python3 -m cli_anything.eagle.eagle_cli --json workflow template review-batch ./workflow.yml
 python3 -m cli_anything.eagle.eagle_cli --json plan explain ./workflow-plan.json --output ./workflow-plan.md --format md
 python3 -m cli_anything.eagle.eagle_cli --json report index ./report-index.json ./reports ./plans ./snapshots
+python3 -m cli_anything.eagle.eagle_cli agent --help
+python3 -m cli_anything.eagle.eagle_cli agent observe --help
+python3 -m cli_anything.eagle.eagle_cli agent plan --help
+python3 -m cli_anything.eagle.eagle_cli agent apply --help
+python3 -m cli_anything.eagle.eagle_cli agent verify --help
+python3 -m cli_anything.eagle.eagle_cli --json agent observe --output ./reports/agent-observe.json
+python3 -m cli_anything.eagle.eagle_cli --json agent plan ./agent-plan.json --goal "Review current selection" --current-selection --add-tag reviewed
+python3 -m cli_anything.eagle.eagle_cli --json agent plan ./agent-folder-plan.json --goal "Review current folder" --current-folder --add-tag reviewed
+python3 -m cli_anything.eagle.eagle_cli --json --dry-run agent apply ./agent-plan.json --save-results ./agent-results.json
+python3 -m cli_anything.eagle.eagle_cli --json agent verify ./agent-plan.json
 python3 -m cli_anything.eagle.eagle_cli --json bridge export-plugin ./bridge-plugin
 python3 -m cli_anything.eagle.eagle_cli --json bridge status
 python3 -m cli_anything.eagle.eagle_cli --json bridge selected-item-ids
@@ -114,6 +125,26 @@ python3 -m cli_anything.eagle.eagle_cli report current-context --help
 
 ## Result
 
+- `0.17.0` checks passed for:
+  - `python3 -m unittest discover -s tests -v`
+  - `python3 -m py_compile cli_anything/eagle/eagle_cli.py tests/test_cli.py`
+  - `node --check companion-plugin/plugin.js`
+  - `node --check cli_anything/eagle/assets/companion-plugin/plugin.js`
+  - `python3 -m cli_anything.eagle.eagle_cli --version`
+  - `python3 -m cli_anything.eagle.eagle_cli agent --help`
+  - `python3 -m cli_anything.eagle.eagle_cli agent observe --help`
+  - `python3 -m cli_anything.eagle.eagle_cli agent plan --help`
+  - `python3 -m cli_anything.eagle.eagle_cli agent apply --help`
+  - `python3 -m cli_anything.eagle.eagle_cli agent verify --help`
+  - `python3 -m cli_anything.eagle.eagle_cli --json item list --limit 1`
+  - `python3 -m cli_anything.eagle.eagle_cli --json agent observe --item-limit 5`
+  - `python3 -m cli_anything.eagle.eagle_cli --json agent plan <tmp>/agent-plan.json --goal "Probe current Eagle harness" --item-id <id> --add-tag agent-probe`
+  - `python3 -m cli_anything.eagle.eagle_cli --json --dry-run agent apply <tmp>/agent-plan.json --save-results <tmp>/agent-results.json`
+  - `python3 -m cli_anything.eagle.eagle_cli --json agent verify <tmp>/agent-plan.json`
+  - `python3 -m cli_anything.eagle.eagle_cli --json bridge export-plugin <tmp>/bridge-plugin`
+  - `python3 -m cli_anything.eagle.eagle_cli --json bridge install-plugin`
+  - on-disk installed plugin manifest at `~/Library/Application Support/Eagle/plugins/.../manifest.json` now reports `0.17.0`
+  - `python3 -m cli_anything.eagle.eagle_cli --json bridge status` currently reports `version_mismatch=true` until Eagle reloads the already-running `0.16.0` plugin instance
 - `0.16.0` checks passed for:
   - `python3 -m unittest discover -s tests -v`
   - `node --check companion-plugin/plugin.js`

@@ -8,7 +8,8 @@ Eagle의 로컬 HTTP API를 대상으로 하며, 앱 정보 조회, 라이브러
 아이템 내보내기, 작업 계획(plan), 쿼리 통계, 롤백 스냅샷, 스냅샷 diff, 중복 및 정리 audit,
 중복 정리 plan 생성, 태그 audit 및 정규화, 저장된 selection 세트, 재사용 가능한 리포트,
 선언형 workflow, manifest 기반 가져오기, 증분 import watch, plan merge/filter/split/validate,
-셸 completion, 문서 schema, 영구 config 기본값, 대시보드 리포트, 고수준 organize 흐름을 제공합니다.
+셸 completion, 문서 schema, 영구 config 기본값, 대시보드 리포트, 고수준 organize 흐름,
+에이전트 관찰과 plan/apply/verify 루프를 제공합니다.
 
 또한 로컬 HTTP API만으로는 어려운 selection, open, 태그, 이름, 폴더 조작을 위해 companion
 bridge plugin도 함께 지원하며, bridge 상태 진단과 정리 도구도 포함합니다.
@@ -78,6 +79,11 @@ cli-anything-eagle --json plan explain ./plans/duplicates.json --output ./plans/
 cli-anything-eagle report index ./reports/index.md ./reports ./plans
 cli-anything-eagle report dashboard ./reports/dashboard.md --format md --all
 cli-anything-eagle --json workflow validate ./workflow.yml
+cli-anything-eagle --json agent observe --output ./reports/agent-observe.json
+cli-anything-eagle --json agent plan ./plans/review-selection.json --goal "Review current selection" --current-selection --add-tag reviewed
+cli-anything-eagle --json agent plan ./plans/review-folder.json --goal "Review current folder" --current-folder --add-tag reviewed
+cli-anything-eagle --json --dry-run agent apply ./plans/review-selection.json --save-results ./plans/review-selection-preview.json
+cli-anything-eagle --json agent verify ./plans/review-selection.json
 cli-anything-eagle --json bridge status
 cli-anything-eagle --json bridge selected-item-ids
 cli-anything-eagle --json report current-context ./reports/current-context.json
@@ -413,9 +419,39 @@ cli-anything-eagle config show
 cli-anything-eagle config unset completion_shell
 ```
 
+AI 에이전트가 안전하게 Eagle을 다루도록 observe -> plan -> apply -> verify 루프 실행:
+
+```bash
+cli-anything-eagle --json agent observe --output ./reports/agent-observe.json
+cli-anything-eagle --json agent plan ./plans/review-selection.json \
+  --goal "Review current selection" \
+  --current-selection \
+  --add-tag reviewed \
+  --save-snapshot ./snapshots/review-selection.json
+cli-anything-eagle --json --dry-run agent apply ./plans/review-selection.json \
+  --save-results ./plans/review-selection-preview.json
+cli-anything-eagle --json agent apply ./plans/review-selection.json \
+  --save-results ./plans/review-selection-results.json
+cli-anything-eagle --json agent verify ./plans/review-selection.json
+```
+
+현재 Eagle 폴더를 기준으로 plan을 만들 수도 있습니다:
+
+```bash
+cli-anything-eagle --json agent plan ./plans/review-folder.json \
+  --goal "Review current folder" \
+  --current-folder \
+  --add-tag reviewed
+cli-anything-eagle --json agent plan ./plans/move-into-current-folder.json \
+  --goal "Move current selection into the current folder" \
+  --current-selection \
+  --move-to-current-folder
+```
+
 ## 지원 명령
 
 - `doctor`
+- `agent observe`, `plan`, `apply`, `verify`
 - `config path`, `show`, `set`, `unset`
 - `app info`
 - `app show`
@@ -426,11 +462,11 @@ cli-anything-eagle config unset completion_shell
 - `tag rename-live`, `merge-live`
 - `tag-group list`, `show`
 - `folder list`, `tree`, `find`, `selected`, `open`, `recent`, `create`, `ensure`, `ensure-path`, `rename`, `update`
-- `item list`, `selected`, `select`, `open`, `export`, `stats`, `info`, `thumbnail`, `update`, `bulk-update`, `rename-bulk`, `move-bulk`
+- `item list`, `selected`, `select`, `open`, `export`, `stats`, `info`, `thumbnail`, `update`, `bulk-update`, `rename-bulk`, `move-bulk`, `move-to-current-folder`
 - `item add-path`, `add-paths`, `add-dir`, `add-url`, `add-urls`, `add-bookmark`
 - `item trash`, `refresh-palette`, `refresh-thumbnail`
-- `select list`, `save`, `show`, `delete`, `sample`, `diff`
-- `report library`, `index`, `tags`, `folders`, `trend`
+- `select list`, `save`, `show`, `delete`, `sample`, `diff`, `save-current-folder`
+- `report library`, `index`, `tags`, `folders`, `trend`, `current-context`
 - `report dashboard`
 - `preset list`, `show`, `delete`, `export`, `import`, `save-item-list`, `run-item-list`, `save-bulk-update`, `run-bulk-update`
 - `snapshot create`, `show`, `diff`, `restore`
@@ -468,6 +504,9 @@ cli-anything-eagle config unset completion_shell
 - `audit dedupe-plan`은 재사용 가능한 휴지통 plan만 기록하며, 자체적으로 삭제나 휴지통 이동을 실행하지 않습니다.
 - `item rename-bulk`, `item move-bulk`, `organize apply`는 이름이나 폴더 배치를 로컬 HTTP API 대신
   Eagle Plugin API로 바꿔야 할 때 companion bridge plugin에 의존합니다.
+- `agent observe`는 Eagle의 library metadata 엔드포인트가 잠깐 실패해도 계속 동작하도록 만들었지만,
+  `agent observe`, `agent plan --current-selection`, `agent plan --current-folder`,
+  `agent plan --move-to-current-folder`는 모두 companion bridge 상태가 건강해야 합니다.
 - `bridge install-plugin`은 번들된 service plugin을 Eagle plugin 디렉터리로 복사합니다.
   plugin 디렉터리를 명시하지 않으면 감지된 모든 Eagle plugin 루트를 갱신합니다.
   Eagle이 이미 열려 있다면 백그라운드 bridge가 시작되도록 한 번 재시작하세요.

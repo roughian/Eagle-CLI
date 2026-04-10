@@ -453,6 +453,20 @@ cli-anything-eagle --json agent plan ./plans/move-into-current-folder.json \
   --move-to-current-folder
 ```
 
+If Eagle does not currently have a live selection, you can still smoke-test the
+full loop against one explicit item and then restore it immediately:
+
+```bash
+cli-anything-eagle --json snapshot create ./snapshots/smoke.json --item-id EXAMPLE
+cli-anything-eagle --json agent plan ./plans/smoke.json \
+  --goal "Smoke test one item" \
+  --item-id EXAMPLE \
+  --add-tag smoke-test
+cli-anything-eagle --json agent apply ./plans/smoke.json
+cli-anything-eagle --json agent verify ./plans/smoke.json
+cli-anything-eagle --json snapshot restore ./snapshots/smoke.json
+```
+
 ## Covered Commands
 
 - `doctor`

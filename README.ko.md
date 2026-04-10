@@ -448,6 +448,20 @@ cli-anything-eagle --json agent plan ./plans/move-into-current-folder.json \
   --move-to-current-folder
 ```
 
+현재 Eagle selection이 비어 있어도, 명시적 아이템 1개를 대상으로 전체 루프를 스모크 테스트한 뒤
+즉시 복원할 수 있습니다:
+
+```bash
+cli-anything-eagle --json snapshot create ./snapshots/smoke.json --item-id EXAMPLE
+cli-anything-eagle --json agent plan ./plans/smoke.json \
+  --goal "Smoke test one item" \
+  --item-id EXAMPLE \
+  --add-tag smoke-test
+cli-anything-eagle --json agent apply ./plans/smoke.json
+cli-anything-eagle --json agent verify ./plans/smoke.json
+cli-anything-eagle --json snapshot restore ./snapshots/smoke.json
+```
+
 ## 지원 명령
 
 - `doctor`
